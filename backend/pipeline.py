@@ -75,31 +75,51 @@ def run_pipeline(state: DatasetState):
         state.progress = 0.3
         print(f"\n=== Crop extraction ===")
 
+        # Compute fixed crop size for size-aware mode (largest cell bbox × multiplier)
+        from config import CONTEXT_WINDOW_MULTIPLIER, SIZE_INVARIANT, ROTATION_INVARIANT
+        size_invariant = getattr(state, 'size_invariant', SIZE_INVARIANT)
+        rotation_invariant = getattr(state, 'rotation_invariant', ROTATION_INVARIANT)
+        crop_mode = getattr(state, 'crop_mode', 'single_cell')
+        fixed_size = None
+        if not size_invariant:
+            max_dim = max(
+                max(o["bbox"][2] - o["bbox"][0], o["bbox"][3] - o["bbox"][1])
+                for o in all_objects
+            )
+            fixed_size = int(max_dim * CONTEXT_WINDOW_MULTIPLIER)
+            fixed_size = max(fixed_size, 64)
+            print(f"  Size-aware mode: fixed crop size = {fixed_size}px")
+
         # Group objects by image index for efficient cropping
         for img_idx, image in enumerate(state.images):
             img_objects = [o for o in all_objects if o["image_index"] == img_idx]
-            crop_mode = getattr(state, 'crop_mode', 'single_cell')
-            img_crops = extract_all_crops(image, img_objects, masks=state.cell_masks[img_idx], crop_mode=crop_mode)
+            img_crops = extract_all_crops(
+                image, img_objects, masks=state.cell_masks[img_idx],
+                crop_mode=crop_mode, size_invariant=size_invariant,
+                rotation_invariant=rotation_invariant, fixed_size=fixed_size,
+            )
             state.crops.extend(img_crops)
 
             pct = 0.3 + (img_idx / total_images) * 0.1  # Cropping = 30-40%
             state.progress = pct
             print(f"  Image {img_idx + 1}: extracted {len(img_crops)} crops")
 
-        # Compute max cell extent (tight bounding box of non-zero pixels) for relative sizing
-        def _cell_extent(crop):
-            mask = np.any(crop > 0, axis=2)
-            if not mask.any():
-                return max(crop.shape[0], crop.shape[1])
-            rows = np.any(mask, axis=1)
-            cols = np.any(mask, axis=0)
-            h = np.where(rows)[0][-1] - np.where(rows)[0][0] + 1
-            w = np.where(cols)[0][-1] - np.where(cols)[0][0] + 1
-            return max(h, w)
+        # Generate thumbnails — preserve relative sizes only in size-aware mode
+        thumb_max = None
+        if not size_invariant:
+            def _cell_extent(crop):
+                mask = np.any(crop > 0, axis=2)
+                if not mask.any():
+                    return max(crop.shape[0], crop.shape[1])
+                rows = np.any(mask, axis=1)
+                cols = np.any(mask, axis=0)
+                h = np.where(rows)[0][-1] - np.where(rows)[0][0] + 1
+                w = np.where(cols)[0][-1] - np.where(cols)[0][0] + 1
+                return max(h, w)
+            thumb_max = max(_cell_extent(c) for c in state.crops)
 
-        max_crop_size = max(_cell_extent(c) for c in state.crops)
         for crop in state.crops:
-            thumb_b64 = state.crop_to_thumbnail_base64(crop, max_crop_size=max_crop_size)
+            thumb_b64 = state.crop_to_thumbnail_base64(crop, max_crop_size=thumb_max)
             state.thumbnails.append(thumb_b64)
 
         print(f"  Total crops in memory: {len(state.crops)}")

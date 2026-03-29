@@ -8,7 +8,81 @@ distort morphology when resizing to DINOv2's fixed input resolution).
 """
 
 import numpy as np
-from config import CONTEXT_WINDOW_MULTIPLIER, CROP_MODE
+from scipy.spatial import ConvexHull
+from skimage.transform import rotate
+from config import CONTEXT_WINDOW_MULTIPLIER, CROP_MODE, SIZE_INVARIANT, ROTATION_INVARIANT
+
+
+def align_crop_rotation(crop: np.ndarray) -> np.ndarray:
+    """
+    Rotate a masked crop so the cell's major axis aligns to 45 degrees
+    (top-left to bottom-right diagonal).
+
+    Uses the convex hull of non-zero pixels to find the major axis via PCA,
+    then rotates the crop to align it. Background (zero) pixels remain zero.
+    """
+    mask = np.any(crop > 0, axis=2)
+    if mask.sum() < 10:
+        return crop
+
+    # Get coordinates of cell pixels
+    ys, xs = np.where(mask)
+    coords = np.column_stack([xs, ys]).astype(np.float64)
+
+    # Convex hull to get the outline, then PCA on hull points for major axis
+    try:
+        hull = ConvexHull(coords)
+        hull_pts = coords[hull.vertices]
+    except Exception:
+        hull_pts = coords
+
+    # PCA: find major axis angle
+    centroid = hull_pts.mean(axis=0)
+    centered = hull_pts - centroid
+    cov = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    # Major axis = eigenvector with largest eigenvalue
+    major_axis = eigenvectors[:, np.argmax(eigenvalues)]
+
+    # Angle of major axis relative to horizontal
+    angle_rad = np.arctan2(major_axis[1], major_axis[0])
+    angle_deg = np.degrees(angle_rad)
+
+    # Target: 45 degrees (top-left to bottom-right diagonal)
+    rotation_deg = 45 - angle_deg
+
+    # Rotate the crop around its center
+    rotated = rotate(crop, -rotation_deg, resize=True, preserve_range=True, order=1)
+
+    # Re-crop to square centered on the cell
+    # Find new bounding box of non-zero pixels
+    new_mask = np.any(rotated > 0, axis=2)
+    if not new_mask.any():
+        return crop
+
+    rows = np.any(new_mask, axis=1)
+    cols = np.any(new_mask, axis=0)
+    y1, y2 = np.where(rows)[0][[0, -1]]
+    x1, x2 = np.where(cols)[0][[0, -1]]
+
+    # Square crop centered on the cell
+    cy, cx = (y1 + y2) // 2, (x1 + x2) // 2
+    half = max(y2 - y1, x2 - x1) // 2 + 2  # small padding
+    H, W = rotated.shape[:2]
+
+    sy1 = max(cy - half, 0)
+    sx1 = max(cx - half, 0)
+    sy2 = min(cy + half, H)
+    sx2 = min(cx + half, W)
+
+    result = np.zeros((2 * half, 2 * half, 3), dtype=np.float32)
+    dy1 = sy1 - (cy - half)
+    dx1 = sx1 - (cx - half)
+    dy2 = dy1 + (sy2 - sy1)
+    dx2 = dx1 + (sx2 - sx1)
+    result[dy1:dy2, dx1:dx2] = rotated[sy1:sy2, sx1:sx2]
+
+    return result.astype(np.float32)
 
 
 def extract_crop(
@@ -139,12 +213,55 @@ def extract_crop_masked(
     return crop
 
 
+def extract_crop_fixed(
+    image: np.ndarray,
+    centroid: tuple,
+    fixed_size: int,
+    masks: np.ndarray = None,
+    object_id: int = None,
+    crop_mode: str = "neighborhood",
+) -> np.ndarray:
+    """
+    Extract a fixed-size square crop centered on the cell.
+
+    All cells get the same crop size, so small cells appear small and large
+    cells appear large — DINOv2 sees the actual scale differences.
+    """
+    H, W = image.shape[:2]
+    half = fixed_size // 2
+    cx_int, cy_int = int(round(centroid[0])), int(round(centroid[1]))
+
+    y1 = cy_int - half
+    x1 = cx_int - half
+    y2 = y1 + fixed_size
+    x2 = x1 + fixed_size
+
+    src_y1, src_x1 = max(y1, 0), max(x1, 0)
+    src_y2, src_x2 = min(y2, H), min(x2, W)
+    dst_y1, dst_x1 = src_y1 - y1, src_x1 - x1
+    dst_y2 = dst_y1 + (src_y2 - src_y1)
+    dst_x2 = dst_x1 + (src_x2 - src_x1)
+
+    crop = np.zeros((fixed_size, fixed_size, 3), dtype=np.float32)
+    crop[dst_y1:dst_y2, dst_x1:dst_x2] = image[src_y1:src_y2, src_x1:src_x2]
+
+    if crop_mode == "single_cell" and masks is not None and object_id is not None:
+        mask_crop = np.zeros((fixed_size, fixed_size), dtype=np.int32)
+        mask_crop[dst_y1:dst_y2, dst_x1:dst_x2] = masks[src_y1:src_y2, src_x1:src_x2]
+        crop[mask_crop != object_id] = 0.0
+
+    return crop
+
+
 def extract_all_crops(
     image: np.ndarray,
     objects: list,
     masks: np.ndarray = None,
     crop_mode: str = CROP_MODE,
     multiplier: float = CONTEXT_WINDOW_MULTIPLIER,
+    size_invariant: bool = SIZE_INVARIANT,
+    rotation_invariant: bool = ROTATION_INVARIANT,
+    fixed_size: int = None,
 ) -> list:
     """
     Extract crops for all detected objects in an image.
@@ -161,12 +278,19 @@ def extract_all_crops(
     """
     crops = []
     for obj in objects:
-        if crop_mode == "single_cell" and masks is not None:
-            mask_label = obj.get("mask_label", obj["object_id"])
+        mask_label = obj.get("mask_label", obj["object_id"])
+        if not size_invariant and fixed_size is not None:
+            crop = extract_crop_fixed(
+                image, obj["centroid"], fixed_size,
+                masks=masks, object_id=mask_label, crop_mode=crop_mode,
+            )
+        elif crop_mode == "single_cell" and masks is not None:
             crop = extract_crop_masked(
                 image, masks, mask_label, obj["centroid"], obj["bbox"], multiplier
             )
         else:
             crop = extract_crop(image, obj["centroid"], obj["bbox"], multiplier)
+        if rotation_invariant:
+            crop = align_crop_rotation(crop)
         crops.append(crop)
     return crops
