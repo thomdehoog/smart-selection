@@ -14,7 +14,7 @@ async function apiFetch(path, options = {}) {
 export const api = {
   upload: (dir, n) =>
     apiFetch("/upload_bbbc021", { method: "POST", body: JSON.stringify({ image_dir: dir, n }) }),
-  process: (cropMode) => apiFetch("/segment_and_embed", { method: "POST", body: JSON.stringify({ crop_mode: cropMode }) }),
+  process: (cropMode, sizeInvariant, rotationInvariant) => apiFetch("/segment_and_embed", { method: "POST", body: JSON.stringify({ crop_mode: cropMode, size_invariant: sizeInvariant, rotation_invariant: rotationInvariant }) }),
   status: () => apiFetch("/status"),
   image: (i) => apiFetch(`/image/${i}`),
   objects: (i) => apiFetch(`/objects?image_index=${i}`),
@@ -58,6 +58,8 @@ function StepLoad({ s, set }) {
   const [dir, setDir] = useState("/Users/thomdehoog/Library/CloudStorage/Dropbox/Projects/smart-selection/microscopy-search/bbbc021_raw/Week1_22123/");
   const [n, setN] = useState(5);
   const [cropMode, setCropMode] = useState("single_cell");
+  const [sizeInvariant, setSizeInvariant] = useState(true);
+  const [rotationInvariant, setRotationInvariant] = useState(true);
   const [loading, setLoading] = useState(false);
   const pollRef = useRef(null);
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
@@ -69,7 +71,7 @@ function StepLoad({ s, set }) {
       if (r.error) { set({ error: r.error }); setLoading(false); return; }
       set({ datasetId: r.dataset_id, numImages: r.num_images, channelNames: r.channel_names,
             busy: true, progress: 0, msg: "Starting..." });
-      await api.process(cropMode);
+      await api.process(cropMode, sizeInvariant, rotationInvariant);
       pollRef.current = setInterval(async () => {
         const st = await api.status();
         set({ progress: st.progress || 0, msg: st.message || "" });
@@ -117,6 +119,36 @@ function StepLoad({ s, set }) {
               <input type="radio" name="cropMode" value="neighborhood"
                 checked={cropMode === "neighborhood"} onChange={() => setCropMode("neighborhood")} />
               Neighborhood
+            </label>
+          </div>
+        </div>
+        <div style={S.formGroup}>
+          <label style={S.label}>Size</label>
+          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
+            <label style={S.radioLabel}>
+              <input type="radio" name="sizeMode" checked={sizeInvariant}
+                onChange={() => setSizeInvariant(true)} />
+              Invariant
+            </label>
+            <label style={S.radioLabel}>
+              <input type="radio" name="sizeMode" checked={!sizeInvariant}
+                onChange={() => setSizeInvariant(false)} />
+              Aware
+            </label>
+          </div>
+        </div>
+        <div style={S.formGroup}>
+          <label style={S.label}>Rotation</label>
+          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
+            <label style={S.radioLabel}>
+              <input type="radio" name="rotMode" checked={rotationInvariant}
+                onChange={() => setRotationInvariant(true)} />
+              Invariant
+            </label>
+            <label style={S.radioLabel}>
+              <input type="radio" name="rotMode" checked={!rotationInvariant}
+                onChange={() => setRotationInvariant(false)} />
+              Aware
             </label>
           </div>
         </div>

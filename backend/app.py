@@ -93,10 +93,11 @@ def segment_and_embed():
     if not state.images:
         return jsonify({"error": "No images in dataset."}), 400
 
-    # Accept crop_mode from request
+    # Accept crop_mode and size_invariant from request
     data = request.json or {}
-    crop_mode = data.get("crop_mode", "single_cell")
-    state.crop_mode = crop_mode
+    state.crop_mode = data.get("crop_mode", "single_cell")
+    state.size_invariant = data.get("size_invariant", True)
+    state.rotation_invariant = data.get("rotation_invariant", True)
 
     # Launch pipeline in background thread
     run_pipeline_async(state)

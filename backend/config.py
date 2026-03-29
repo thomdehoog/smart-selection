@@ -17,6 +17,8 @@ CELLPOSE_GPU = True
 # Crop extraction
 CONTEXT_WINDOW_MULTIPLIER = 1.5  # 1.5× bounding box — tight crop with some context
 CROP_MODE = "single_cell"        # "single_cell" = mask out non-cell pixels; "neighborhood" = full context
+SIZE_INVARIANT = True            # True = resize all crops to same input (ignore size); False = fixed crop window (size matters)
+ROTATION_INVARIANT = True        # True = align major axis before embedding; False = keep original orientation
 
 # FAISS
 FAISS_USE_GPU = False            # CPU is fine for <100K objects in Phase 1
