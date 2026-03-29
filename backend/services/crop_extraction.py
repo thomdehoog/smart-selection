@@ -82,7 +82,57 @@ def align_crop_rotation(crop: np.ndarray) -> np.ndarray:
     dx2 = dx1 + (sx2 - sx1)
     result[dy1:dy2, dx1:dx2] = rotated[sy1:sy2, sx1:sx2]
 
-    return result.astype(np.float32)
+    result = result.astype(np.float32)
+
+    # Resolve 180° flip ambiguity: complex/curved side should be on the right
+    result = _resolve_flip(result)
+
+    return result
+
+
+def _resolve_flip(crop: np.ndarray) -> np.ndarray:
+    """
+    Resolve the 180-degree flip ambiguity after major axis alignment.
+
+    Splits the cell contour into two halves along the minor axis (perpendicular
+    to the diagonal). Measures perimeter complexity of each half. If the more
+    complex half is on the left, rotates 180 degrees so it ends up on the right.
+    """
+    mask = np.any(crop > 0, axis=2)
+    if mask.sum() < 10:
+        return crop
+
+    H, W = mask.shape
+    cy, cx = H / 2, W / 2
+
+    # The minor axis is perpendicular to the 45° diagonal,
+    # i.e., it runs from top-right to bottom-left (135°).
+    # Points "right of the diagonal" satisfy: (x - cx) + (y - cy) > 0
+    # Points "left of the diagonal" satisfy: (x - cx) + (y - cy) < 0
+
+    # Find contour pixels (edge pixels of the mask)
+    from scipy.ndimage import binary_erosion
+    interior = binary_erosion(mask)
+    contour = mask & ~interior
+    if contour.sum() < 4:
+        return crop
+
+    ys, xs = np.where(contour)
+
+    # Split contour into right half and left half relative to the minor axis
+    # Minor axis perpendicular to 45° diagonal: direction is (1, -1)
+    # Project onto minor axis: dot with (1, -1) / sqrt(2)
+    proj = (xs - cx) - (ys - cy)  # positive = right side, negative = left side
+
+    right_count = np.sum(proj > 0)
+    left_count = np.sum(proj < 0)
+
+    # More contour pixels on a side = more complex perimeter on that side
+    # If left side is more complex, flip 180°
+    if left_count > right_count:
+        crop = np.rot90(crop, 2)
+
+    return crop
 
 
 def extract_crop(
