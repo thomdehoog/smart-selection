@@ -21,10 +21,10 @@ export const api = {
   mask: (i) => apiFetch(`/mask/${i}`),
   crops: (ids) =>
     apiFetch("/crops", { method: "POST", body: JSON.stringify({ object_ids: ids }) }),
-  search: (pos, neg, k) =>
+  search: (pos, neg, k, mode) =>
     apiFetch("/search", {
       method: "POST",
-      body: JSON.stringify({ positive_ids: pos, negative_ids: neg, top_k: k, negative_alpha: 1.0 }),
+      body: JSON.stringify({ positive_ids: pos, negative_ids: neg, top_k: k, negative_alpha: 1.0, search_mode: mode || "weighted" }),
     }),
 };
 
@@ -35,7 +35,7 @@ export function useAppState() {
     classifierPos: new Set(), classifierNeg: new Set(),
     results: [],
     busy: false, progress: 0, msg: "", error: null,
-    threshold: 0.0, perImageCap: 50, viewMode: "gallery",
+    threshold: 0.0, perImageCap: 50, viewMode: "gallery", searchMode: "weighted",
   });
   const set = useCallback((p) => setS((prev) => ({ ...prev, ...p })), []);
   const togglePos = useCallback((id) => {
@@ -400,7 +400,7 @@ function StepReview({ s, set, togglePos, toggleNeg }) {
 
   const apply = async () => {
     set({ step: 4, results: [] });
-    const sim = await api.search([...s.classifierPos], [...s.classifierNeg], 200);
+    const sim = await api.search([...s.classifierPos], [...s.classifierNeg], 200, s.searchMode);
     set({ results: sim.results || [] });
   };
 
@@ -724,7 +724,7 @@ function StepSearch({ s, set, togglePos, toggleNeg }) {
         )}
       </div>
 
-      {/* Controls: threshold + per-image cap */}
+      {/* Controls: threshold + per-image cap + search mode */}
       <div style={S.controlBar}>
         <div style={S.controlGroup}>
           <label style={S.controlLabel}>Min similarity ({s.threshold.toFixed(2)})</label>
@@ -735,6 +735,15 @@ function StepSearch({ s, set, togglePos, toggleNeg }) {
           <label style={S.controlLabel}>Max per image ({s.perImageCap})</label>
           <input type="range" min={1} max={100} step={1} value={s.perImageCap}
             onChange={e => set({ perImageCap: +e.target.value })} style={S.slider} />
+        </div>
+        <div style={S.controlGroup}>
+          <label style={S.controlLabel}>Search mode</label>
+          <div style={{ display: "flex", gap: 4, background: "#F3F4F6", borderRadius: 8, padding: 3 }}>
+            <button onClick={() => set({ searchMode: "weighted" })}
+              style={{ ...S.viewToggleBtn, ...(s.searchMode === "weighted" ? S.viewToggleBtnActive : {}) }}>Weighted</button>
+            <button onClick={() => set({ searchMode: "centroid" })}
+              style={{ ...S.viewToggleBtn, ...(s.searchMode === "centroid" ? S.viewToggleBtnActive : {}) }}>Centroid</button>
+          </div>
         </div>
       </div>
 
