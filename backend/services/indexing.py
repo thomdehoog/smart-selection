@@ -194,3 +194,33 @@ def search(
             break
 
     return result_ids, result_scores
+
+
+def search_dissimilar(
+    index: faiss.Index,
+    embeddings: np.ndarray,
+    positive_ids: list,
+    top_k: int = DEFAULT_TOP_K,
+) -> tuple:
+    """Find objects most dissimilar to the positive examples."""
+    exclude = set(positive_ids)
+    pos_embeddings = embeddings[positive_ids]
+    query = pos_embeddings.mean(axis=0)
+    norm = np.linalg.norm(query)
+    if norm > 1e-8:
+        query = query / norm
+
+    scores = embeddings @ query
+    ranked = np.argsort(scores)  # ascending = most dissimilar first
+
+    result_ids = []
+    result_scores = []
+    for idx in ranked:
+        if int(idx) in exclude:
+            continue
+        result_ids.append(int(idx))
+        result_scores.append(float(scores[idx]))
+        if len(result_ids) >= top_k:
+            break
+
+    return result_ids, result_scores
