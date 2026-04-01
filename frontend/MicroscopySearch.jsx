@@ -26,6 +26,19 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ positive_ids: pos, negative_ids: neg, top_k: k, negative_alpha: 1.0, search_mode: mode || "weighted" }),
     }),
+  listProjects: () => apiFetch("/list_projects"),
+  loadProject: (name) =>
+    apiFetch("/load_project", { method: "POST", body: JSON.stringify({ project_name: name }) }),
+  saveProject: (name, posIds, negIds, searchMode, threshold, perImageCap) =>
+    apiFetch("/save_project", {
+      method: "POST",
+      body: JSON.stringify({
+        project_name: name,
+        positive_ids: posIds && posIds.length > 0 ? posIds : null,
+        negative_ids: negIds && negIds.length > 0 ? negIds : null,
+        search_mode: searchMode, threshold, per_image_cap: perImageCap,
+      }),
+    }),
 };
 
 export function useAppState() {
@@ -36,6 +49,7 @@ export function useAppState() {
     results: [],
     busy: false, progress: 0, msg: "", error: null,
     threshold: 0.0, perImageCap: 50, viewMode: "gallery", searchMode: "weighted",
+    projectName: null, saving: false,
   });
   const set = useCallback((p) => setS((prev) => ({ ...prev, ...p })), []);
   const togglePos = useCallback((id) => {
@@ -69,6 +83,46 @@ export function useAppState() {
 
 /* ─── Step 1: Load ──────────────────────────────────────────────────────── */
 
+function ProjectPicker({ onLoad, onClose }) {
+  const [projects, setProjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.listProjects().then(d => { setProjects(d.projects || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  return (
+    <div style={S.modalOverlay}>
+      <div style={S.modalCard}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h2 style={{ ...S.h2, margin: 0 }}>Load Project</h2>
+          <button style={{ ...S.linkBtn, color: "#6B7280", fontSize: 20, padding: 4 }} onClick={onClose}>&times;</button>
+        </div>
+        {loading && <p style={S.muted}>Loading projects...</p>}
+        {!loading && projects.length === 0 && (
+          <p style={S.muted}>No saved projects found. Start a new dataset to create one.</p>
+        )}
+        {projects.map(p => (
+          <div key={p.project_name} onClick={() => onLoad(p.project_name)}
+            style={S.projectRow}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 15, color: "#111" }}>{p.project_name}</div>
+              <div style={{ fontSize: 13, color: "#6B7280", marginTop: 2 }}>
+                {p.num_images} images · {p.num_objects} cells
+                {p.has_classifier && " · classifier saved"}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "#9CA3AF" }}>
+              {p.created ? new Date(p.created).toLocaleDateString() : ""}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StepLoad({ s, set }) {
   const [dir, setDir] = useState("/Users/thomdehoog/Library/CloudStorage/Dropbox/Projects/smart-selection/microscopy-search/bbbc021_raw/Week1_22123/");
   const [n, setN] = useState(5);
@@ -76,8 +130,38 @@ function StepLoad({ s, set }) {
   const [sizeInvariant, setSizeInvariant] = useState(true);
   const [rotationInvariant, setRotationInvariant] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
   const pollRef = useRef(null);
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const loadProject = async (projectName) => {
+    setShowPicker(false);
+    setLoading(true); set({ error: null });
+    try {
+      const r = await api.loadProject(projectName);
+      if (r.error) { set({ error: r.error }); setLoading(false); return; }
+      set({
+        datasetId: r.dataset_id, numImages: r.num_images,
+        channelNames: r.channel_names || ["DAPI", "Ch2", "Ch3"],
+        projectName: projectName,
+      });
+      // Restore classifier state if saved
+      const cls = r.classifier || {};
+      if (cls.positive_ids && cls.positive_ids.length > 0) {
+        set({
+          classifierPos: new Set(cls.positive_ids),
+          classifierNeg: new Set(cls.negative_ids || []),
+          searchMode: cls.search_mode || "weighted",
+          threshold: cls.threshold || 0.0,
+          perImageCap: cls.per_image_cap || 50,
+        });
+      }
+      const img = await api.image(0);
+      const obj = await api.objects(0);
+      set({ imageData: img, objects: obj.objects || [], imgIdx: 0, step: 2 });
+      setLoading(false);
+    } catch (e) { set({ error: e.message }); setLoading(false); }
+  };
 
   const loadAndProcess = async () => {
     setLoading(true); set({ error: null });
@@ -107,72 +191,83 @@ function StepLoad({ s, set }) {
 
   return (
     <section style={S.card}>
+      {showPicker && <ProjectPicker onLoad={loadProject} onClose={() => setShowPicker(false)} />}
+
       <h2 style={S.h2}>Load Dataset</h2>
-      <p style={S.muted}>Point to a BBBC021 plate directory. Images will be loaded, segmented, and embedded.</p>
+      <p style={S.muted}>Load a saved project or point to a BBBC021 plate directory for a new analysis.</p>
 
-      <div style={S.formGroup}>
-        <label style={S.label}>Image directory</label>
-        <input style={S.input} value={dir} onChange={e => setDir(e.target.value)}
-          placeholder="/path/to/bbbc021_raw/Week1_22123/" />
-      </div>
-
-      <div style={{ display: "flex", gap: 24, marginTop: 20 }}>
-        <div style={S.formGroup}>
-          <label style={S.label}>Fields of view</label>
-          <input style={{ ...S.input, width: 100 }} type="number" min={1} max={100}
-            value={n} onChange={e => setN(+e.target.value || 5)} />
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Crop mode</label>
-          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-            <label style={S.radioLabel}>
-              <input type="radio" name="cropMode" value="single_cell"
-                checked={cropMode === "single_cell"} onChange={() => setCropMode("single_cell")} />
-              Single cell
-            </label>
-            <label style={S.radioLabel}>
-              <input type="radio" name="cropMode" value="neighborhood"
-                checked={cropMode === "neighborhood"} onChange={() => setCropMode("neighborhood")} />
-              Neighborhood
-            </label>
-          </div>
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Size</label>
-          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-            <label style={S.radioLabel}>
-              <input type="radio" name="sizeMode" checked={sizeInvariant}
-                onChange={() => setSizeInvariant(true)} />
-              Invariant
-            </label>
-            <label style={S.radioLabel}>
-              <input type="radio" name="sizeMode" checked={!sizeInvariant}
-                onChange={() => setSizeInvariant(false)} />
-              Aware
-            </label>
-          </div>
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Rotation</label>
-          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-            <label style={S.radioLabel}>
-              <input type="radio" name="rotMode" checked={rotationInvariant}
-                onChange={() => setRotationInvariant(true)} />
-              Invariant
-            </label>
-            <label style={S.radioLabel}>
-              <input type="radio" name="rotMode" checked={!rotationInvariant}
-                onChange={() => setRotationInvariant(false)} />
-              Aware
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 24 }}>
-        <button style={S.btnPrimary} onClick={loadAndProcess} disabled={loading || s.busy || !dir.trim()}>
-          {loading || s.busy ? "Processing..." : "Start"}
+      <div style={{ marginBottom: 24 }}>
+        <button style={S.btnSecondary} onClick={() => setShowPicker(true)} disabled={loading || s.busy}>
+          Open Saved Project
         </button>
+      </div>
+
+      <div style={{ borderTop: "1px solid #E5E7EB", paddingTop: 20 }}>
+        <h3 style={{ fontSize: 16, fontWeight: 600, margin: "0 0 12px", color: "#374151" }}>New Dataset</h3>
+        <div style={S.formGroup}>
+          <label style={S.label}>Image directory</label>
+          <input style={S.input} value={dir} onChange={e => setDir(e.target.value)}
+            placeholder="/path/to/bbbc021_raw/Week1_22123/" />
+        </div>
+
+        <div style={{ display: "flex", gap: 24, marginTop: 20 }}>
+          <div style={S.formGroup}>
+            <label style={S.label}>Fields of view</label>
+            <input style={{ ...S.input, width: 100 }} type="number" min={1} max={100}
+              value={n} onChange={e => setN(+e.target.value || 5)} />
+          </div>
+          <div style={S.formGroup}>
+            <label style={S.label}>Crop mode</label>
+            <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
+              <label style={S.radioLabel}>
+                <input type="radio" name="cropMode" value="single_cell"
+                  checked={cropMode === "single_cell"} onChange={() => setCropMode("single_cell")} />
+                Single cell
+              </label>
+              <label style={S.radioLabel}>
+                <input type="radio" name="cropMode" value="neighborhood"
+                  checked={cropMode === "neighborhood"} onChange={() => setCropMode("neighborhood")} />
+                Neighborhood
+              </label>
+            </div>
+          </div>
+          <div style={S.formGroup}>
+            <label style={S.label}>Size</label>
+            <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
+              <label style={S.radioLabel}>
+                <input type="radio" name="sizeMode" checked={sizeInvariant}
+                  onChange={() => setSizeInvariant(true)} />
+                Invariant
+              </label>
+              <label style={S.radioLabel}>
+                <input type="radio" name="sizeMode" checked={!sizeInvariant}
+                  onChange={() => setSizeInvariant(false)} />
+                Aware
+              </label>
+            </div>
+          </div>
+          <div style={S.formGroup}>
+            <label style={S.label}>Rotation</label>
+            <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
+              <label style={S.radioLabel}>
+                <input type="radio" name="rotMode" checked={rotationInvariant}
+                  onChange={() => setRotationInvariant(true)} />
+                Invariant
+              </label>
+              <label style={S.radioLabel}>
+                <input type="radio" name="rotMode" checked={!rotationInvariant}
+                  onChange={() => setRotationInvariant(false)} />
+                Aware
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 24 }}>
+          <button style={S.btnPrimary} onClick={loadAndProcess} disabled={loading || s.busy || !dir.trim()}>
+            {loading || s.busy ? "Processing..." : "Start"}
+          </button>
+        </div>
       </div>
 
       {s.busy && (
@@ -775,24 +870,50 @@ function StepSearch({ s, set, togglePos, toggleNeg }) {
 export default function App() {
   const { s, set, togglePos, toggleNeg } = useAppState();
   const steps = ["Load Data", "Exemplars", "Review", "Results"];
+
+  const saveProject = async () => {
+    const name = s.projectName || prompt("Project name:", s.datasetId || "my-project");
+    if (!name) return;
+    set({ saving: true });
+    try {
+      await api.saveProject(
+        name,
+        [...s.classifierPos], [...s.classifierNeg],
+        s.searchMode, s.threshold, s.perImageCap,
+      );
+      set({ projectName: name, saving: false });
+      alert(`Project "${name}" saved.`);
+    } catch (e) {
+      set({ saving: false });
+      alert(`Save failed: ${e.message}`);
+    }
+  };
+
   return (
     <div style={S.root}>
       <header style={S.header}>
         <span style={S.logo}>Microscopy Search</span>
-        <nav style={{ display: "flex", gap: 4 }}>
-          {steps.map((label, i) => (
-            <span key={i}
-              onClick={() => { if (s.step >= 2 && i + 1 <= s.step) set({ step: i + 1 }); }}
-              style={{
-                ...S.stepPill,
-                ...(s.step === i + 1 ? S.stepPillActive : {}),
-                ...(s.step > i + 1 ? S.stepPillDone : {}),
-                cursor: s.step >= 2 && i + 1 <= s.step ? "pointer" : "default",
-              }}>
-              {i + 1}. {label}
-            </span>
-          ))}
-        </nav>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <nav style={{ display: "flex", gap: 4 }}>
+            {steps.map((label, i) => (
+              <span key={i}
+                onClick={() => { if (s.step >= 2 && i + 1 <= s.step) set({ step: i + 1 }); }}
+                style={{
+                  ...S.stepPill,
+                  ...(s.step === i + 1 ? S.stepPillActive : {}),
+                  ...(s.step > i + 1 ? S.stepPillDone : {}),
+                  cursor: s.step >= 2 && i + 1 <= s.step ? "pointer" : "default",
+                }}>
+                {i + 1}. {label}
+              </span>
+            ))}
+          </nav>
+          {s.step >= 2 && (
+            <button style={S.btnSecondary} onClick={saveProject} disabled={s.saving}>
+              {s.saving ? "Saving..." : "Save Project"}
+            </button>
+          )}
+        </div>
       </header>
       <main style={S.main}>
         {s.step === 1 && <StepLoad s={s} set={set} />}
@@ -956,5 +1077,22 @@ const S = {
   viewToggleBtnActive: {
     background: "#fff", color: "#111", fontWeight: 600,
     boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+  },
+
+  // Modal
+  modalOverlay: {
+    position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+    background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center",
+    justifyContent: "center", zIndex: 1000,
+  },
+  modalCard: {
+    background: "#fff", borderRadius: 16, padding: 32, maxWidth: 520, width: "90%",
+    maxHeight: "70vh", overflowY: "auto", boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
+  },
+  projectRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "14px 16px", borderRadius: 10, border: "1px solid #E2E4E9",
+    marginBottom: 8, cursor: "pointer", transition: "all 0.15s",
+    background: "#FAFBFC",
   },
 };

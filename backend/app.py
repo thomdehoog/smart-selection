@@ -11,8 +11,8 @@ import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from config import FLASK_HOST, FLASK_PORT, UPLOAD_DIR
-from models.dataset import create_dataset, get_dataset, DatasetState
+from config import FLASK_HOST, FLASK_PORT, UPLOAD_DIR, PROJECTS_DIR
+from models.dataset import create_dataset, get_dataset, DatasetState, clear_dataset
 from services.image_io import load_bbbc021_first_n, make_thumbnail
 from services.indexing import search, search_dissimilar
 from pipeline import run_pipeline_async
@@ -25,6 +25,7 @@ app = Flask(__name__)
 CORS(app)  # Allow React frontend on localhost:3000 to call Flask on :5000
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(PROJECTS_DIR, exist_ok=True)
 
 
 # ─── Upload & Configure ─────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ def upload_bbbc021():
         return jsonify({"error": "No valid 3-channel images found"}), 400
 
     state.images = images
+    state.source_dir = image_dir
 
     return jsonify({
         "status": "ok",
@@ -355,6 +357,120 @@ def search_dissimilar_endpoint():
         })
 
     return jsonify({"results": results})
+
+
+# ─── Project Save / Load ───────────────────────────────────────────────
+
+@app.route("/api/save_project", methods=["POST"])
+def save_project():
+    """
+    Save the current dataset state to a project folder on disk.
+    Saves segmentation masks, embeddings, thumbnails, and optionally classifier state.
+    """
+    state = get_dataset()
+    if state is None:
+        return jsonify({"error": "No dataset loaded"}), 400
+
+    data = request.json or {}
+    project_name = data.get("project_name", state.dataset_id)
+
+    # Classifier state (optional — may not be defined yet)
+    classifier_pos = data.get("positive_ids")
+    classifier_neg = data.get("negative_ids")
+    search_mode = data.get("search_mode", "weighted")
+    threshold = data.get("threshold", 0.0)
+    per_image_cap = data.get("per_image_cap", 50)
+
+    project_dir = os.path.join(PROJECTS_DIR, project_name)
+    state.save_project(
+        project_dir,
+        classifier_pos=classifier_pos,
+        classifier_neg=classifier_neg,
+        search_mode=search_mode,
+        threshold=threshold,
+        per_image_cap=per_image_cap,
+    )
+
+    return jsonify({
+        "status": "ok",
+        "project_name": project_name,
+        "project_dir": project_dir,
+    })
+
+
+@app.route("/api/load_project", methods=["POST"])
+def load_project():
+    """
+    Load a saved project from disk. Restores masks, embeddings, metadata,
+    and rebuilds the FAISS index — skipping the expensive pipeline.
+    """
+    import json as _json
+    global _current_dataset
+
+    data = request.json or {}
+    project_name = data.get("project_name")
+    if not project_name:
+        return jsonify({"error": "project_name is required"}), 400
+
+    project_dir = os.path.join(PROJECTS_DIR, project_name)
+    if not os.path.isdir(project_dir):
+        return jsonify({"error": f"Project not found: {project_name}"}), 404
+
+    # Load project state
+    state = DatasetState.load_project(project_dir)
+
+    # Replace global dataset state
+    from models.dataset import _current_dataset as _cd
+    import models.dataset as _ds_mod
+    _ds_mod._current_dataset = state
+
+    # Load classifier if saved
+    classifier = {}
+    classifier_path = os.path.join(project_dir, "classifier.json")
+    if os.path.exists(classifier_path):
+        with open(classifier_path) as f:
+            classifier = _json.load(f)
+
+    return jsonify({
+        "status": "ok",
+        "project_name": project_name,
+        "dataset_id": state.dataset_id,
+        "num_images": state.num_images(),
+        "num_objects": state.num_objects(),
+        "channel_names": state.channel_names,
+        "image_dimensions": list(state.image_dimensions()),
+        "pipeline": {
+            "crop_mode": state.crop_mode,
+            "size_invariant": state.size_invariant,
+            "rotation_invariant": state.rotation_invariant,
+        },
+        "classifier": classifier,
+    })
+
+
+@app.route("/api/list_projects", methods=["GET"])
+def list_projects():
+    """List all saved projects with their metadata."""
+    import json as _json
+    projects = []
+    if os.path.isdir(PROJECTS_DIR):
+        for name in sorted(os.listdir(PROJECTS_DIR)):
+            manifest_path = os.path.join(PROJECTS_DIR, name, "project.json")
+            if os.path.exists(manifest_path):
+                with open(manifest_path) as f:
+                    manifest = _json.load(f)
+                has_classifier = os.path.exists(
+                    os.path.join(PROJECTS_DIR, name, "classifier.json")
+                )
+                projects.append({
+                    "project_name": name,
+                    "created": manifest.get("created", ""),
+                    "num_images": manifest.get("num_images", 0),
+                    "num_objects": manifest.get("num_objects", 0),
+                    "source_dir": manifest.get("source_dir", ""),
+                    "has_classifier": has_classifier,
+                })
+    return jsonify({"projects": projects})
 
 
 # ─── Export ──────────────────────────────────────────────────────────────────

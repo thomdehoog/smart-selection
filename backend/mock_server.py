@@ -321,6 +321,40 @@ def search_dissimilar():
     return jsonify({"results": results})
 
 
+@app.route("/api/save_project", methods=["POST"])
+def save_project():
+    data = request.json or {}
+    name = data.get("project_name", "mock-project")
+    return jsonify({"status": "ok", "project_name": name, "project_dir": f"projects/{name}"})
+
+
+@app.route("/api/load_project", methods=["POST"])
+def load_project():
+    data = request.json or {}
+    name = data.get("project_name", "mock-project")
+    return jsonify({
+        "status": "ok",
+        "project_name": name,
+        "dataset_id": "mock-001",
+        "num_images": NUM_IMAGES,
+        "num_objects": len(ALL_OBJECTS),
+        "channel_names": ["DAPI", "Tubulin", "Actin"],
+        "image_dimensions": [IMAGE_W, IMAGE_H],
+        "pipeline": {"crop_mode": "single_cell", "size_invariant": True, "rotation_invariant": True},
+        "classifier": {},
+    })
+
+
+@app.route("/api/list_projects", methods=["GET"])
+def list_projects():
+    return jsonify({"projects": [
+        {"project_name": "Week1_plate1", "created": "2025-01-15T10:30:00", "num_images": 5,
+         "num_objects": 150, "source_dir": "/data/bbbc021/Week1", "has_classifier": True},
+        {"project_name": "Week2_analysis", "created": "2025-01-16T14:20:00", "num_images": 8,
+         "num_objects": 240, "source_dir": "/data/bbbc021/Week2", "has_classifier": False},
+    ]})
+
+
 @app.route("/api/export", methods=["POST"])
 def export():
     ids = request.json.get("accepted_ids", [])
