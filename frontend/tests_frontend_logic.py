@@ -20,119 +20,124 @@ import json
 # 1. State management logic
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestSelectionToggle:
-    """Tests the set-based selection toggle logic used in useAppState."""
+class TestClassifierToggle:
+    """Tests the classifier positive/negative toggle logic used in useAppState."""
 
-    def test_toggle_adds_new_id(self):
-        selected = set()
-        obj_id = 42
-        # Toggle logic: has -> delete, else -> add
-        if obj_id in selected:
-            selected.discard(obj_id)
+    @staticmethod
+    def toggle_pos(pos, neg, obj_id):
+        """Reimplementation of togglePos: add to positive, remove from negative."""
+        pos, neg = set(pos), set(neg)
+        if obj_id in pos:
+            pos.discard(obj_id)
         else:
-            selected.add(obj_id)
-        assert 42 in selected
+            pos.add(obj_id)
+            neg.discard(obj_id)
+        return pos, neg
 
-    def test_toggle_removes_existing_id(self):
-        selected = {42, 7, 99}
-        obj_id = 42
-        if obj_id in selected:
-            selected.discard(obj_id)
+    @staticmethod
+    def toggle_neg(pos, neg, obj_id):
+        """Reimplementation of toggleNeg: add to negative, remove from positive."""
+        pos, neg = set(pos), set(neg)
+        if obj_id in neg:
+            neg.discard(obj_id)
         else:
-            selected.add(obj_id)
-        assert 42 not in selected
-        assert len(selected) == 2
+            neg.add(obj_id)
+            pos.discard(obj_id)
+        return pos, neg
 
-    def test_toggle_idempotent_double_toggle(self):
-        selected = set()
-        obj_id = 10
-        # Toggle on
-        selected.add(obj_id) if obj_id not in selected else selected.discard(obj_id)
-        assert 10 in selected
-        # Toggle off
-        selected.add(obj_id) if obj_id not in selected else selected.discard(obj_id)
-        assert 10 not in selected
+    def test_toggle_pos_adds_new_id(self):
+        pos, neg = self.toggle_pos(set(), set(), 42)
+        assert 42 in pos
 
-    def test_selection_persists_across_images(self):
-        """Switching images should not clear the selection set."""
-        selected = {1, 2, 3}  # Selected from image 0
-        # Simulate switching to image 1 — objects change, selection doesn't
-        new_objects = [{"object_id": 10}, {"object_id": 11}]
-        # Selection set is independent of objects list
-        assert selected == {1, 2, 3}
+    def test_toggle_pos_removes_existing_id(self):
+        pos, neg = self.toggle_pos({42, 7}, set(), 42)
+        assert 42 not in pos
+        assert len(pos) == 1
 
-    def test_multiple_selections(self):
-        selected = set()
-        for i in [5, 10, 15, 20]:
-            selected.add(i)
-        assert len(selected) == 4
-        assert selected == {5, 10, 15, 20}
+    def test_toggle_pos_removes_from_neg(self):
+        """Adding to positive should remove from negative."""
+        pos, neg = self.toggle_pos(set(), {42}, 42)
+        assert 42 in pos
+        assert 42 not in neg
+
+    def test_toggle_neg_adds_new_id(self):
+        pos, neg = self.toggle_neg(set(), set(), 42)
+        assert 42 in neg
+
+    def test_toggle_neg_removes_from_pos(self):
+        """Adding to negative should remove from positive."""
+        pos, neg = self.toggle_neg({42}, set(), 42)
+        assert 42 in neg
+        assert 42 not in pos
+
+    def test_cannot_be_in_both(self):
+        pos, neg = {1, 2, 3}, set()
+        pos, neg = self.toggle_neg(pos, neg, 2)
+        assert 2 not in pos and 2 in neg
+        pos, neg = self.toggle_pos(pos, neg, 2)
+        assert 2 in pos and 2 not in neg
+
+    def test_exemplars_persist_across_images(self):
+        """Switching images should not clear the classifier sets."""
+        pos = {1, 2, 3}
+        neg = {10}
+        # Simulate switching to image 1 — sets are independent
+        assert pos == {1, 2, 3}
+        assert neg == {10}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. Accept/reject logic
+# 2. Per-image cap logic
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestAcceptReject:
-    """Tests the accept/reject state transitions in the search refinement loop."""
+class TestPerImageCap:
+    """Tests the per-image cap filtering applied to search results."""
 
-    def test_accept_moves_to_positive(self):
-        positive = [1, 2, 3]
+    @staticmethod
+    def apply_cap(results, cap):
+        """Reimplementation of the per-image cap logic."""
+        if cap <= 0:
+            return results
+        counts = {}
+        out = []
+        for r in results:
+            img = r["image_index"]
+            counts[img] = counts.get(img, 0) + 1
+            if counts[img] <= cap:
+                out.append(r)
+        return out
+
+    def test_no_cap(self):
+        results = [{"image_index": 0}] * 10
+        assert len(self.apply_cap(results, 0)) == 10
+
+    def test_cap_limits_per_image(self):
         results = [
-            {"object_id": 10, "similarity_score": 0.9},
-            {"object_id": 11, "similarity_score": 0.8},
+            {"image_index": 0, "similarity_score": 0.9},
+            {"image_index": 0, "similarity_score": 0.8},
+            {"image_index": 0, "similarity_score": 0.7},
+            {"image_index": 1, "similarity_score": 0.6},
         ]
-        # Accept object 10
-        accepted_id = 10
-        positive = positive + [accepted_id]
-        results = [r for r in results if r["object_id"] != accepted_id]
+        capped = self.apply_cap(results, 2)
+        assert len(capped) == 3  # 2 from image 0 + 1 from image 1
+        img0 = [r for r in capped if r["image_index"] == 0]
+        assert len(img0) == 2
 
-        assert 10 in positive
-        assert len(results) == 1
-        assert results[0]["object_id"] == 11
-
-    def test_reject_moves_to_negative(self):
-        negative = []
+    def test_cap_preserves_order(self):
+        """Cap should keep the first N per image (highest similarity first)."""
         results = [
-            {"object_id": 10, "similarity_score": 0.9},
-            {"object_id": 11, "similarity_score": 0.8},
+            {"image_index": 0, "similarity_score": 0.9},
+            {"image_index": 0, "similarity_score": 0.5},
+            {"image_index": 0, "similarity_score": 0.3},
         ]
-        # Reject object 10
-        rejected_id = 10
-        negative = negative + [rejected_id]
-        results = [r for r in results if r["object_id"] != rejected_id]
+        capped = self.apply_cap(results, 1)
+        assert len(capped) == 1
+        assert capped[0]["similarity_score"] == 0.9
 
-        assert 10 in negative
-        assert len(results) == 1
-
-    def test_accept_then_reject_different_objects(self):
-        positive = [1]
-        negative = []
-        results = [
-            {"object_id": 10, "similarity_score": 0.9},
-            {"object_id": 11, "similarity_score": 0.8},
-            {"object_id": 12, "similarity_score": 0.7},
-        ]
-
-        # Accept 10
-        positive.append(10)
-        results = [r for r in results if r["object_id"] != 10]
-
-        # Reject 12
-        negative.append(12)
-        results = [r for r in results if r["object_id"] != 12]
-
-        assert positive == [1, 10]
-        assert negative == [12]
-        assert len(results) == 1
-        assert results[0]["object_id"] == 11
-
-    def test_accepted_id_not_in_results(self):
-        """After accepting, the ID should not appear in the results list."""
-        results = [{"object_id": i, "similarity_score": 0.9 - i * 0.1} for i in range(5)]
-        accepted = 2
-        results = [r for r in results if r["object_id"] != accepted]
-        assert all(r["object_id"] != accepted for r in results)
+    def test_cap_across_many_images(self):
+        results = [{"image_index": i % 3, "similarity_score": 0.5} for i in range(9)]
+        capped = self.apply_cap(results, 2)
+        assert len(capped) == 6  # 2 per image × 3 images
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -340,13 +345,13 @@ class TestAPIShapes:
         request = {
             "positive_ids": [1, 2, 3],
             "negative_ids": [10, 11],
-            "top_k": 50,
-            "negative_alpha": 0.4,
+            "top_k": 200,
+            "negative_alpha": 1.0,
         }
         assert len(request["positive_ids"]) > 0
         assert isinstance(request["negative_ids"], list)
         assert request["top_k"] > 0
-        assert 0 <= request["negative_alpha"] <= 1
+        assert request["negative_alpha"] == 1.0  # fixed, not user-configurable
 
     def test_search_response_shape(self):
         response = {
@@ -379,43 +384,39 @@ class TestStepNavigation:
     """Tests the step transition rules."""
 
     def test_initial_state(self):
-        state = {"step": 1, "datasetId": None, "selected": set()}
+        state = {"step": 1, "datasetId": None, "classifierPos": set(), "classifierNeg": set()}
         assert state["step"] == 1
 
     def test_load_to_select(self):
         """After pipeline completes, should transition to step 2."""
-        state = {"step": 1, "datasetId": "abc", "selected": set()}
-        # Pipeline complete → set step to 2
+        state = {"step": 1, "datasetId": "abc"}
         state["step"] = 2
         assert state["step"] == 2
 
-    def test_select_to_review_requires_selection(self):
-        """Cannot go to review with empty selection."""
-        selected = set()
-        can_proceed = len(selected) > 0
+    def test_select_to_review_requires_positive(self):
+        """Cannot go to review with empty positive set."""
+        pos = set()
+        can_proceed = len(pos) > 0
         assert not can_proceed
 
-        selected.add(1)
-        can_proceed = len(selected) > 0
+        pos.add(1)
+        can_proceed = len(pos) > 0
         assert can_proceed
 
-    def test_review_to_search(self):
-        state = {"step": 3, "positive": [1, 2, 3]}
+    def test_review_to_results(self):
+        state = {"step": 3, "classifierPos": {1, 2, 3}, "classifierNeg": {10}}
         state["step"] = 4
         state["results"] = []
-        state["negative"] = []
         assert state["step"] == 4
 
-    def test_start_over_resets_to_step_2(self):
-        state = {"step": 4, "positive": [1, 2], "negative": [5, 6], "results": [{"id": 10}]}
+    def test_edit_exemplars_preserves_classifier(self):
+        """Going back to step 2 should preserve classifier sets."""
+        state = {"step": 4, "classifierPos": {1, 2}, "classifierNeg": {5}, "results": [{"id": 10}]}
         state["step"] = 2
-        state["negative"] = []
         state["results"] = []
         assert state["step"] == 2
-        assert state["negative"] == []
-        assert state["results"] == []
-        # Positive is preserved — user can adjust their selections
-        assert state["positive"] == [1, 2]
+        assert state["classifierPos"] == {1, 2}
+        assert state["classifierNeg"] == {5}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
