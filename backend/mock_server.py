@@ -228,6 +228,72 @@ def search():
     })
 
 
+@app.route("/api/mask/<int:img_idx>", methods=["GET"])
+def get_mask(img_idx):
+    """Generate a mask image where cell IDs are encoded in red/green channels."""
+    if img_idx >= NUM_IMAGES:
+        return jsonify({"error": "Not found"}), 404
+
+    mask = Image.new("RGBA", (IMAGE_W, IMAGE_H), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(mask)
+    for obj in ALL_OBJECTS:
+        if obj["image_index"] != img_idx:
+            continue
+        oid = obj["object_id"]
+        r_val = oid & 0xFF
+        g_val = (oid >> 8) & 0xFF
+        cx, cy = int(obj["centroid"][0]), int(obj["centroid"][1])
+        x1, y1, x2, y2 = obj["bbox"]
+        draw.ellipse([x1, y1, x2, y2], fill=(r_val, g_val, 0, 255))
+
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    mask_b64 = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+    return jsonify({
+        "image_index": img_idx,
+        "width": IMAGE_W,
+        "height": IMAGE_H,
+        "mask_base64": mask_b64,
+        "num_objects": len([o for o in ALL_OBJECTS if o["image_index"] == img_idx]),
+    })
+
+
+@app.route("/api/search_dissimilar", methods=["POST"])
+def search_dissimilar():
+    data = request.json
+    pos_ids = data.get("positive_ids", [])
+    top_k = data.get("top_k", 28)
+
+    pos_idx = [oid - 1 for oid in pos_ids if 1 <= oid <= len(ALL_OBJECTS)]
+    if not pos_idx:
+        return jsonify({"error": "No valid positive IDs"}), 400
+
+    query = EMBEDDINGS[pos_idx].mean(axis=0)
+    query /= np.linalg.norm(query) + 1e-8
+    scores = EMBEDDINGS @ query
+    exclude = set(pos_ids)
+    ranked = np.argsort(scores)  # ascending = most dissimilar first
+
+    results = []
+    for idx in ranked:
+        oid = ALL_OBJECTS[idx]["object_id"]
+        if oid in exclude:
+            continue
+        results.append({
+            "object_id": oid,
+            "image_index": ALL_OBJECTS[idx]["image_index"],
+            "similarity_score": round(float(scores[idx]), 4),
+            "centroid": ALL_OBJECTS[idx]["centroid"],
+            "area": ALL_OBJECTS[idx]["area"],
+            "thumbnail_base64": make_cell_thumbnail(oid),
+        })
+        if len(results) >= top_k:
+            break
+
+    return jsonify({"results": results})
+
+
 @app.route("/api/export", methods=["POST"])
 def export():
     ids = request.json.get("accepted_ids", [])
@@ -244,5 +310,5 @@ if __name__ == "__main__":
     print("Mock Backend — Microscopy Semantic Search")
     print(f"Dataset: {NUM_IMAGES} images, {len(ALL_OBJECTS)} cells, {EMBED_DIM}d embeddings")
     print("Pipeline simulates 5s processing. Search uses real cosine similarity.")
-    print("http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    print("http://localhost:5050\n")
+    app.run(host="0.0.0.0", port=5050, debug=False)
