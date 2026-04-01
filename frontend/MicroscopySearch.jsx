@@ -21,15 +21,10 @@ export const api = {
   mask: (i) => apiFetch(`/mask/${i}`),
   crops: (ids) =>
     apiFetch("/crops", { method: "POST", body: JSON.stringify({ object_ids: ids }) }),
-  search: (pos, neg, k, alpha) =>
+  search: (pos, neg, k) =>
     apiFetch("/search", {
       method: "POST",
-      body: JSON.stringify({ positive_ids: pos, negative_ids: neg, top_k: k, negative_alpha: alpha }),
-    }),
-  searchDissimilar: (pos, k) =>
-    apiFetch("/search_dissimilar", {
-      method: "POST",
-      body: JSON.stringify({ positive_ids: pos, top_k: k }),
+      body: JSON.stringify({ positive_ids: pos, negative_ids: neg, top_k: k, negative_alpha: 1.0 }),
     }),
 };
 
@@ -37,19 +32,39 @@ export function useAppState() {
   const [s, setS] = useState({
     step: 1, datasetId: null, numImages: 0, channelNames: [],
     imgIdx: 0, imageData: null, objects: [],
-    selected: new Set(), positive: [], negative: [], results: [], dissimilar: [],
+    classifierPos: new Set(), classifierNeg: new Set(),
+    results: [],
     busy: false, progress: 0, msg: "", error: null,
-    alpha: 0.4, threshold: 0.0, viewMode: "gallery",
+    threshold: 0.0, perImageCap: 50, viewMode: "gallery",
   });
   const set = useCallback((p) => setS((prev) => ({ ...prev, ...p })), []);
-  const toggle = useCallback((id) => {
+  const togglePos = useCallback((id) => {
     setS((prev) => {
-      const next = new Set(prev.selected);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return { ...prev, selected: next };
+      const next = new Set(prev.classifierPos);
+      const neg = new Set(prev.classifierNeg);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        neg.delete(id); // can't be in both
+      }
+      return { ...prev, classifierPos: next, classifierNeg: neg };
     });
   }, []);
-  return { s, set, toggle };
+  const toggleNeg = useCallback((id) => {
+    setS((prev) => {
+      const next = new Set(prev.classifierNeg);
+      const pos = new Set(prev.classifierPos);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        pos.delete(id); // can't be in both
+      }
+      return { ...prev, classifierNeg: next, classifierPos: pos };
+    });
+  }, []);
+  return { s, set, togglePos, toggleNeg };
 }
 
 /* ─── Step 1: Load ──────────────────────────────────────────────────────── */
@@ -173,21 +188,28 @@ function StepLoad({ s, set }) {
   );
 }
 
-/* ─── Step 2: Select ────────────────────────────────────────────────────── */
+/* ─── Step 2: Select Exemplars ─────────────────────────────────────────── */
 
-function StepSelect({ s, set, toggle }) {
+function StepSelect({ s, set, togglePos, toggleNeg }) {
   const canvasRef = useRef(null);
   const [hovered, setHovered] = useState(null);
-  const [thumbs, setThumbs] = useState([]);
+  const [posThumbs, setPosThumbs] = useState([]);
+  const [negThumbs, setNegThumbs] = useState([]);
   const [maskData, setMaskData] = useState(null);
   const imgRef = useRef(null);
   const maskImgRef = useRef(null);
 
   useEffect(() => {
-    const ids = [...s.selected];
-    if (ids.length === 0) { setThumbs([]); return; }
-    api.crops(ids).then(d => setThumbs(d.crops || [])).catch(() => {});
-  }, [s.selected]);
+    const posIds = [...s.classifierPos];
+    if (posIds.length === 0) setPosThumbs([]);
+    else api.crops(posIds).then(d => setPosThumbs(d.crops || [])).catch(() => {});
+  }, [s.classifierPos]);
+
+  useEffect(() => {
+    const negIds = [...s.classifierNeg];
+    if (negIds.length === 0) setNegThumbs([]);
+    else api.crops(negIds).then(d => setNegThumbs(d.crops || [])).catch(() => {});
+  }, [s.classifierNeg]);
 
   useEffect(() => {
     api.mask(s.imgIdx).then(d => setMaskData(d)).catch(() => {});
@@ -228,7 +250,7 @@ function StepSelect({ s, set, toggle }) {
         clipCv.width = cv.width; clipCv.height = cv.height;
         const clipCtx = clipCv.getContext("2d");
 
-        const highlightIds = new Set([...s.selected]);
+        const highlightIds = new Set([...s.classifierPos, ...s.classifierNeg]);
         if (hovered && !highlightIds.has(hovered)) highlightIds.add(hovered);
 
         if (highlightIds.size > 0) {
@@ -239,7 +261,13 @@ function StepSelect({ s, set, toggle }) {
               if (cellId > 0 && highlightIds.has(cellId)) {
                 const cx = Math.floor(mx * sx), cy = Math.floor(my * sy);
                 const cw = Math.max(Math.ceil(sx), 1), ch = Math.max(Math.ceil(sy), 1);
-                clipCtx.fillStyle = hovered === cellId && !s.selected.has(cellId) ? "rgba(200,220,255,0.7)" : "white";
+                if (hovered === cellId && !s.classifierPos.has(cellId) && !s.classifierNeg.has(cellId)) {
+                  clipCtx.fillStyle = "rgba(200,220,255,0.7)";
+                } else if (s.classifierNeg.has(cellId)) {
+                  clipCtx.fillStyle = "rgba(255,130,130,0.85)";
+                } else {
+                  clipCtx.fillStyle = "rgba(130,200,255,0.85)";
+                }
                 clipCtx.fillRect(cx, cy, cw, ch);
               }
             }
@@ -252,7 +280,7 @@ function StepSelect({ s, set, toggle }) {
       }
     };
     img.src = s.imageData.thumbnail_base64;
-  }, [s.imageData, s.objects, s.selected, hovered, maskData]);
+  }, [s.imageData, s.objects, s.classifierPos, s.classifierNeg, hovered, maskData]);
 
   const hitTest = (e) => {
     const cv = canvasRef.current;
@@ -278,8 +306,10 @@ function StepSelect({ s, set, toggle }) {
   return (
     <section style={S.card}>
       <div style={{ marginBottom: 12 }}>
-        <h2 style={S.h2}>Select Cells</h2>
-        <p style={{ ...S.muted, margin: 0 }}>{s.objects.length} cells detected · {s.selected.size} selected</p>
+        <h2 style={S.h2}>Select Exemplars</h2>
+        <p style={{ ...S.muted, margin: 0 }}>
+          {s.objects.length} cells detected · Left-click = positive · Right-click = negative
+        </p>
       </div>
 
       <div style={{ display: "flex", gap: 20, marginTop: 12 }}>
@@ -303,29 +333,46 @@ function StepSelect({ s, set, toggle }) {
           <div style={S.canvasFrame}>
             <canvas ref={canvasRef}
               style={{ width: "100%", display: "block", cursor: "crosshair" }}
-              onClick={e => { const id = hitTest(e); if (id) toggle(id); }}
+              onClick={e => { const id = hitTest(e); if (id) togglePos(id); }}
+              onContextMenu={e => { e.preventDefault(); const id = hitTest(e); if (id) toggleNeg(id); }}
               onMouseMove={e => setHovered(hitTest(e))}
               onMouseLeave={() => setHovered(null)} />
           </div>
         </div>
 
         <div style={S.sidebar}>
-          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 12, color: "#1A1A1A" }}>
-            Selected ({s.selected.size})
+          {/* Positive exemplars */}
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8, color: "#2563EB" }}>
+            Positive ({s.classifierPos.size})
           </div>
-          {s.selected.size === 0 && <p style={{ ...S.caption, color: "#9CA3AF" }}>Click cells in the image to select them</p>}
+          {s.classifierPos.size === 0 && <p style={{ ...S.caption, color: "#9CA3AF" }}>Left-click cells to add</p>}
           <div style={S.thumbGrid}>
-            {thumbs.map(t => (
-              <div key={t.object_id} style={S.sideThumb} onClick={() => toggle(t.object_id)}>
+            {posThumbs.map(t => (
+              <div key={t.object_id} style={{ ...S.sideThumb, borderColor: "#2563EB" }} onClick={() => togglePos(t.object_id)}>
                 <img src={t.thumbnail_base64} alt="" style={{ width: "100%", display: "block", borderRadius: 4 }} />
                 <span style={S.sideThumbId}>#{t.object_id}</span>
               </div>
             ))}
           </div>
+
+          {/* Negative exemplars */}
+          <div style={{ fontWeight: 600, fontSize: 15, marginTop: 16, marginBottom: 8, color: "#DC2626" }}>
+            Negative ({s.classifierNeg.size})
+          </div>
+          {s.classifierNeg.size === 0 && <p style={{ ...S.caption, color: "#9CA3AF" }}>Right-click cells to add</p>}
+          <div style={S.thumbGrid}>
+            {negThumbs.map(t => (
+              <div key={t.object_id} style={{ ...S.sideThumb, borderColor: "#DC2626" }} onClick={() => toggleNeg(t.object_id)}>
+                <img src={t.thumbnail_base64} alt="" style={{ width: "100%", display: "block", borderRadius: 4 }} />
+                <span style={S.sideThumbId}>#{t.object_id}</span>
+              </div>
+            ))}
+          </div>
+
           <div style={{ display: "flex", gap: 8, marginTop: 16, paddingTop: 16, borderTop: "1px solid #E5E7EB" }}>
-            <button style={S.btnSecondary} onClick={() => set({ selected: new Set() })}>Clear</button>
-            <button style={{ ...S.btnPrimary, flex: 1 }} disabled={s.selected.size === 0}
-              onClick={() => set({ step: 3, positive: [...s.selected] })}>Review</button>
+            <button style={S.btnSecondary} onClick={() => set({ classifierPos: new Set(), classifierNeg: new Set() })}>Clear</button>
+            <button style={{ ...S.btnPrimary, flex: 1 }} disabled={s.classifierPos.size === 0}
+              onClick={() => set({ step: 3 })}>Review</button>
           </div>
         </div>
       </div>
@@ -333,46 +380,77 @@ function StepSelect({ s, set, toggle }) {
   );
 }
 
-/* ─── Step 3: Review ────────────────────────────────────────────────────── */
+/* ─── Step 3: Review Classifier ────────────────────────────────────────── */
 
-function StepReview({ s, set }) {
-  const [crops, setCrops] = useState([]);
-  useEffect(() => { if (s.positive.length > 0) api.crops(s.positive).then(d => setCrops(d.crops || [])); }, [s.positive]);
+function StepReview({ s, set, togglePos, toggleNeg }) {
+  const [posCrops, setPosCrops] = useState([]);
+  const [negCrops, setNegCrops] = useState([]);
 
-  const remove = (id) => {
-    const ns = new Set(s.selected); ns.delete(id);
-    set({ positive: s.positive.filter(x => x !== id), selected: ns });
-  };
+  useEffect(() => {
+    const posIds = [...s.classifierPos];
+    if (posIds.length === 0) setPosCrops([]);
+    else api.crops(posIds).then(d => setPosCrops(d.crops || []));
+  }, [s.classifierPos]);
 
-  const search = async () => {
-    set({ step: 4, results: [], negative: [], dissimilar: [] });
-    const [sim, dis] = await Promise.all([
-      api.search(s.positive, [], 50, s.alpha),
-      api.searchDissimilar(s.positive, 28),
-    ]);
-    set({ results: sim.results || [], dissimilar: dis.results || [] });
+  useEffect(() => {
+    const negIds = [...s.classifierNeg];
+    if (negIds.length === 0) setNegCrops([]);
+    else api.crops(negIds).then(d => setNegCrops(d.crops || []));
+  }, [s.classifierNeg]);
+
+  const apply = async () => {
+    set({ step: 4, results: [] });
+    const sim = await api.search([...s.classifierPos], [...s.classifierNeg], 200);
+    set({ results: sim.results || [] });
   };
 
   return (
     <section style={S.card}>
-      <h2 style={S.h2}>Review Selections</h2>
-      <p style={S.muted}>{crops.length} cells selected. Remove any mistakes before searching.</p>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, margin: "20px 0" }}>
-        {crops.map(c => (
-          <div key={c.object_id} style={S.resultCard}>
+      <h2 style={S.h2}>Review Classifier</h2>
+      <p style={S.muted}>
+        {s.classifierPos.size} positive{s.classifierNeg.size > 0 ? ` · ${s.classifierNeg.size} negative` : ""} exemplars.
+        Remove any mistakes before applying.
+      </p>
+
+      {/* Positive exemplars */}
+      <h3 style={{ ...S.galleryTitleGreen, marginTop: 16 }}>Positive Exemplars</h3>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, margin: "0 0 20px" }}>
+        {posCrops.map(c => (
+          <div key={c.object_id} style={{ ...S.resultCard, borderColor: "#2563EB", borderWidth: 2 }}>
             <div style={S.thumbContainer}>
               <img src={c.thumbnail_base64} alt="" style={S.thumbImg} />
             </div>
             <div style={S.cardFooter}>
-              <span style={{ color: "#374151", fontWeight: 500 }}>#{c.object_id}</span>
-              <button style={S.linkBtn} onClick={() => remove(c.object_id)}>Remove</button>
+              <span style={{ color: "#2563EB", fontWeight: 600 }}>#{c.object_id}</span>
+              <button style={S.linkBtn} onClick={() => togglePos(c.object_id)}>Remove</button>
             </div>
           </div>
         ))}
       </div>
+
+      {/* Negative exemplars */}
+      {negCrops.length > 0 && (
+        <>
+          <h3 style={{ ...S.galleryTitleRed, marginTop: 8 }}>Negative Exemplars</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, margin: "0 0 20px" }}>
+            {negCrops.map(c => (
+              <div key={c.object_id} style={{ ...S.resultCard, borderColor: "#DC2626", borderWidth: 2 }}>
+                <div style={S.thumbContainer}>
+                  <img src={c.thumbnail_base64} alt="" style={S.thumbImg} />
+                </div>
+                <div style={S.cardFooter}>
+                  <span style={{ color: "#DC2626", fontWeight: 600 }}>#{c.object_id}</span>
+                  <button style={S.linkBtn} onClick={() => toggleNeg(c.object_id)}>Remove</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
       <div style={{ display: "flex", gap: 12 }}>
         <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Back</button>
-        <button style={S.btnPrimary} onClick={search} disabled={s.positive.length === 0}>Find Similar</button>
+        <button style={S.btnPrimary} onClick={apply} disabled={s.classifierPos.size === 0}>Apply Classifier</button>
       </div>
     </section>
   );
@@ -380,7 +458,7 @@ function StepReview({ s, set }) {
 
 /* ─── Step 4: Search ────────────────────────────────────────────────────── */
 
-function MapView({ s, set }) {
+function MapView({ s, visible }) {
   const canvasRef = useRef(null);
   const [hovered, setHovered] = useState(null);
   const [maskData, setMaskData] = useState(null);
@@ -389,10 +467,8 @@ function MapView({ s, set }) {
   const imgRef = useRef(null);
   const maskImgRef = useRef(null);
 
-  // Build lookups — mask-based rendering naturally filters to current image
   const resultScores = new Map();
-  for (const r of s.results) resultScores.set(r.object_id, r.similarity_score);
-  const positiveSet = new Set(s.positive);
+  for (const r of visible) resultScores.set(r.object_id, r.similarity_score);
 
   useEffect(() => {
     api.image(mapImgIdx).then(d => setMapImageData(d)).catch(() => {});
@@ -434,7 +510,9 @@ function MapView({ s, set }) {
         clipCv.width = cv.width; clipCv.height = cv.height;
         const clipCtx = clipCv.getContext("2d");
 
-        const allHighlight = new Set([...positiveSet]);
+        const posSet = s.classifierPos;
+        const negSet = s.classifierNeg;
+        const allHighlight = new Set([...posSet, ...negSet]);
         for (const id of resultScores.keys()) allHighlight.add(id);
         if (hovered && !allHighlight.has(hovered)) allHighlight.add(hovered);
 
@@ -446,10 +524,12 @@ function MapView({ s, set }) {
               if (cellId > 0 && allHighlight.has(cellId)) {
                 const cx = Math.floor(mx * sx), cy = Math.floor(my * sy);
                 const cw = Math.max(Math.ceil(sx), 1), ch = Math.max(Math.ceil(sy), 1);
-                if (hovered === cellId && !positiveSet.has(cellId) && !resultScores.has(cellId)) {
+                if (hovered === cellId && !posSet.has(cellId) && !negSet.has(cellId) && !resultScores.has(cellId)) {
                   clipCtx.fillStyle = "rgba(200,220,255,0.7)";
-                } else if (positiveSet.has(cellId)) {
+                } else if (posSet.has(cellId)) {
                   clipCtx.fillStyle = "rgba(100,160,255,0.9)";
+                } else if (negSet.has(cellId)) {
+                  clipCtx.fillStyle = "rgba(255,130,130,0.85)";
                 } else if (resultScores.has(cellId)) {
                   const score = resultScores.get(cellId);
                   const g = Math.round(160 + score * 95);
@@ -469,7 +549,7 @@ function MapView({ s, set }) {
       }
     };
     img.src = mapImageData.thumbnail_base64;
-  }, [mapImageData, maskData, hovered, s.positive, s.results, s.threshold]);
+  }, [mapImageData, maskData, hovered, s.classifierPos, s.classifierNeg, visible]);
 
   const hitTest = (e) => {
     const cv = canvasRef.current;
@@ -486,12 +566,12 @@ function MapView({ s, set }) {
     return cellId > 0 ? cellId : null;
   };
 
-  const hoveredResult = hovered ? s.results.find(r => r.object_id === hovered) : null;
-  const hoveredIsPositive = hovered && s.positive.includes(hovered);
+  const hoveredResult = hovered ? visible.find(r => r.object_id === hovered) : null;
+  const hoveredIsPos = hovered && s.classifierPos.has(hovered);
+  const hoveredIsNeg = hovered && s.classifierNeg.has(hovered);
 
   return (
     <div style={{ display: "flex", gap: 20 }}>
-      {/* Image tiles */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
         {Array.from({ length: s.numImages }, (_, i) => (
           <button key={i} onClick={() => setMapImgIdx(i)}
@@ -506,7 +586,6 @@ function MapView({ s, set }) {
         ))}
       </div>
 
-      {/* Canvas */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={S.canvasFrame}>
           <canvas ref={canvasRef}
@@ -516,25 +595,28 @@ function MapView({ s, set }) {
         </div>
       </div>
 
-      {/* Legend + hover info sidebar */}
       <div style={S.sidebar}>
         <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 12, color: "#1A1A1A" }}>Legend</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ width: 16, height: 16, borderRadius: 4, background: "rgba(100,160,255,0.9)" }} />
-            <span style={{ fontSize: 13, color: "#374151" }}>Query cells ({positiveSet.size})</span>
+            <span style={{ fontSize: 13, color: "#374151" }}>Positive exemplars</span>
           </div>
+          {s.classifierNeg.size > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 16, height: 16, borderRadius: 4, background: "rgba(255,130,130,0.85)" }} />
+              <span style={{ fontSize: 13, color: "#374151" }}>Negative exemplars</span>
+            </div>
+          )}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ width: 16, height: 16, borderRadius: 4, background: "rgba(80,220,100,0.85)" }} />
-            <span style={{ fontSize: 13, color: "#374151" }}>Similar results ({resultScores.size})</span>
+            <span style={{ fontSize: 13, color: "#374151" }}>Selected ({resultScores.size})</span>
           </div>
         </div>
 
-        {(hoveredResult || hoveredIsPositive) && (
+        {(hoveredResult || hoveredIsPos || hoveredIsNeg || hovered) && (
           <div style={{ padding: 12, background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB" }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#111" }}>
-              Cell #{hovered}
-            </div>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#111" }}>Cell #{hovered}</div>
             {hoveredResult && (
               <div style={{ fontSize: 13, color: "#6B7280", marginTop: 4 }}>
                 Similarity: <span style={{ fontWeight: 600, color: hoveredResult.similarity_score > 0.8 ? "#16A34A" : hoveredResult.similarity_score > 0.5 ? "#CA8A04" : "#DC2626" }}>
@@ -542,15 +624,11 @@ function MapView({ s, set }) {
                 </span>
               </div>
             )}
-            {hoveredIsPositive && (
-              <div style={{ fontSize: 13, color: "#2563EB", marginTop: 4, fontWeight: 500 }}>Query cell</div>
+            {hoveredIsPos && <div style={{ fontSize: 13, color: "#2563EB", marginTop: 4, fontWeight: 500 }}>Positive exemplar</div>}
+            {hoveredIsNeg && <div style={{ fontSize: 13, color: "#DC2626", marginTop: 4, fontWeight: 500 }}>Negative exemplar</div>}
+            {!hoveredResult && !hoveredIsPos && !hoveredIsNeg && (
+              <div style={{ fontSize: 13, color: "#9CA3AF", marginTop: 4 }}>Not in selection</div>
             )}
-          </div>
-        )}
-        {!hoveredResult && !hoveredIsPositive && hovered && (
-          <div style={{ padding: 12, background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB" }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#111" }}>Cell #{hovered}</div>
-            <div style={{ fontSize: 13, color: "#9CA3AF", marginTop: 4 }}>Not in results</div>
           </div>
         )}
       </div>
@@ -558,33 +636,34 @@ function MapView({ s, set }) {
   );
 }
 
-function StepSearch({ s, set }) {
+function StepSearch({ s, set, togglePos, toggleNeg }) {
   const [posCrops, setPosCrops] = useState([]);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => { if (s.positive.length > 0) api.crops(s.positive).then(d => setPosCrops(d.crops || [])); }, [s.positive]);
+  const [negCrops, setNegCrops] = useState([]);
 
-  const accept = (id) => {
-    set({ positive: [...s.positive, id], results: s.results.filter(r => r.object_id !== id), dissimilar: s.dissimilar.filter(r => r.object_id !== id) });
-  };
-  const reject = (id) => {
-    set({ negative: [...s.negative, id], results: s.results.filter(r => r.object_id !== id), dissimilar: s.dissimilar.filter(r => r.object_id !== id) });
-  };
-  const recompute = async () => {
-    setBusy(true);
-    const [sim, dis] = await Promise.all([
-      api.search(s.positive, s.negative, 50, s.alpha),
-      api.searchDissimilar(s.positive, 28),
-    ]);
-    set({ results: sim.results || [], dissimilar: dis.results || [] });
-    setBusy(false);
-  };
+  useEffect(() => {
+    const ids = [...s.classifierPos];
+    if (ids.length === 0) setPosCrops([]);
+    else api.crops(ids).then(d => setPosCrops(d.crops || []));
+  }, [s.classifierPos]);
 
-  const visible = s.results.filter(r => r.similarity_score >= s.threshold);
+  useEffect(() => {
+    const ids = [...s.classifierNeg];
+    if (ids.length === 0) setNegCrops([]);
+    else api.crops(ids).then(d => setNegCrops(d.crops || []));
+  }, [s.classifierNeg]);
+
+  // Apply threshold + per-image cap
+  const aboveThreshold = s.results.filter(r => r.similarity_score >= s.threshold);
+  const visible = (() => {
+    if (s.perImageCap <= 0) return aboveThreshold;
+    const counts = {};
+    return aboveThreshold.filter(r => {
+      counts[r.image_index] = (counts[r.image_index] || 0) + 1;
+      return counts[r.image_index] <= s.perImageCap;
+    });
+  })();
+
   const COLS = 5;
-  const MAX_ROWS = 4;
-  const maxItems = COLS * MAX_ROWS;
-  const mostSimilar = visible.slice(0, maxItems);
-  const mostDissimilar = s.dissimilar.slice(0, maxItems);
 
   const ResultCard = ({ r }) => (
     <div style={S.resultCard}>
@@ -597,10 +676,6 @@ function StepSearch({ s, set }) {
           {(r.similarity_score * 100).toFixed(0)}%
         </span>
       </div>
-      <div style={{ display: "flex" }}>
-        <button onClick={() => accept(r.object_id)} style={S.acceptBtn}>Similar</button>
-        <button onClick={() => reject(r.object_id)} style={S.rejectBtn}>Dissimilar</button>
-      </div>
     </div>
   );
 
@@ -608,95 +683,79 @@ function StepSearch({ s, set }) {
     <section style={S.card}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div>
-          <h2 style={S.h2}>Search Results</h2>
-          <p style={{ ...S.muted, margin: 0 }}>{s.positive.length} positive · {s.negative.length} rejected · {visible.length} matches</p>
+          <h2 style={S.h2}>Selection Results</h2>
+          <p style={{ ...S.muted, margin: 0 }}>
+            {s.classifierPos.size} positive{s.classifierNeg.size > 0 ? ` · ${s.classifierNeg.size} negative` : ""} exemplars · {visible.length} cells selected
+          </p>
         </div>
         <div style={{ display: "flex", gap: 4, background: "#F3F4F6", borderRadius: 8, padding: 3 }}>
-          <button
-            onClick={() => set({ viewMode: "gallery" })}
-            style={{
-              ...S.viewToggleBtn,
-              ...(s.viewMode === "gallery" ? S.viewToggleBtnActive : {}),
-            }}>Gallery</button>
-          <button
-            onClick={() => set({ viewMode: "map" })}
-            style={{
-              ...S.viewToggleBtn,
-              ...(s.viewMode === "map" ? S.viewToggleBtnActive : {}),
-            }}>Map</button>
+          <button onClick={() => set({ viewMode: "gallery" })}
+            style={{ ...S.viewToggleBtn, ...(s.viewMode === "gallery" ? S.viewToggleBtnActive : {}) }}>Gallery</button>
+          <button onClick={() => set({ viewMode: "map" })}
+            style={{ ...S.viewToggleBtn, ...(s.viewMode === "map" ? S.viewToggleBtnActive : {}) }}>Map</button>
+        </div>
+      </div>
+
+      {/* Classifier exemplars */}
+      <div style={{ display: "flex", gap: 12, margin: "12px 0 20px", flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#2563EB", marginBottom: 6 }}>Positive exemplars</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {posCrops.map(c => (
+              <div key={c.object_id} style={{ width: 56, height: 56, borderRadius: 6, overflow: "hidden", border: "2px solid #2563EB", cursor: "pointer", position: "relative" }}
+                onClick={() => togglePos(c.object_id)}>
+                <img src={c.thumbnail_base64} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              </div>
+            ))}
+          </div>
+        </div>
+        {negCrops.length > 0 && (
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#DC2626", marginBottom: 6 }}>Negative exemplars</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {negCrops.map(c => (
+                <div key={c.object_id} style={{ width: 56, height: 56, borderRadius: 6, overflow: "hidden", border: "2px solid #DC2626", cursor: "pointer" }}
+                  onClick={() => toggleNeg(c.object_id)}>
+                  <img src={c.thumbnail_base64} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Controls: threshold + per-image cap */}
+      <div style={S.controlBar}>
+        <div style={S.controlGroup}>
+          <label style={S.controlLabel}>Min similarity ({s.threshold.toFixed(2)})</label>
+          <input type="range" min={0} max={1} step={0.05} value={s.threshold}
+            onChange={e => set({ threshold: +e.target.value })} style={S.slider} />
+        </div>
+        <div style={S.controlGroup}>
+          <label style={S.controlLabel}>Max per image ({s.perImageCap})</label>
+          <input type="range" min={1} max={100} step={1} value={s.perImageCap}
+            onChange={e => set({ perImageCap: +e.target.value })} style={S.slider} />
         </div>
       </div>
 
       {s.viewMode === "gallery" && (
-        <>
-          {/* Selected cells */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, margin: "16px 0 24px" }}>
-            {posCrops.map(c => (
-              <div key={c.object_id} style={{ ...S.resultCard, borderColor: "#2563EB", borderWidth: 2 }}>
-                <div style={S.thumbContainer}>
-                  <img src={c.thumbnail_base64} alt="" style={S.thumbImg} />
-                </div>
-                <div style={S.cardFooter}>
-                  <span style={{ color: "#2563EB", fontWeight: 600 }}>#{c.object_id}</span>
-                  <button onClick={() => {
-                    const np = s.positive.filter(x => x !== c.object_id);
-                    const ns = new Set(s.selected); ns.delete(c.object_id);
-                    set({ positive: np, selected: ns });
-                  }} style={S.linkBtn}>Remove</button>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Controls */}
-          <div style={S.controlBar}>
-            <div style={S.controlGroup}>
-              <label style={S.controlLabel}>Rejection strength ({s.alpha.toFixed(2)})</label>
-              <input type="range" min={0} max={1} step={0.05} value={s.alpha}
-                onChange={e => set({ alpha: +e.target.value })} style={S.slider} />
+        <div style={S.gallerySection}>
+          <div style={S.gallerySimilar}>
+            <h3 style={S.galleryTitleGreen}>Selected Cells ({visible.length})</h3>
+            <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
+              {visible.map(r => <ResultCard key={r.object_id} r={r} />)}
             </div>
-            <div style={S.controlGroup}>
-              <label style={S.controlLabel}>Min similarity ({s.threshold.toFixed(2)})</label>
-              <input type="range" min={0} max={1} step={0.05} value={s.threshold}
-                onChange={e => set({ threshold: +e.target.value })} style={S.slider} />
-            </div>
-            <button style={S.btnPrimary} onClick={recompute} disabled={busy}>
-              {busy ? "Searching..." : "Recompute"}
-            </button>
+            {visible.length === 0 && (
+              <p style={S.emptyMsg}>No cells above threshold. Try lowering the minimum similarity.</p>
+            )}
           </div>
-
-          {/* Most Similar */}
-          <div style={S.gallerySection}>
-            <div style={S.gallerySimilar}>
-              <h3 style={S.galleryTitleGreen}>Most Similar</h3>
-              <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
-                {mostSimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
-              </div>
-              {mostSimilar.length === 0 && !busy && (
-                <p style={S.emptyMsg}>No results above threshold.</p>
-              )}
-            </div>
-          </div>
-
-          {/* Most Dissimilar */}
-          <div style={{ ...S.gallerySection, marginTop: 16 }}>
-            <div style={S.galleryDissimilar}>
-              <h3 style={S.galleryTitleRed}>Most Dissimilar</h3>
-              <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
-                {mostDissimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
-              </div>
-              {mostDissimilar.length === 0 && !busy && (
-                <p style={S.emptyMsg}>No dissimilar results loaded yet.</p>
-              )}
-            </div>
-          </div>
-        </>
+        </div>
       )}
 
-      {s.viewMode === "map" && <MapView s={s} set={set} />}
+      {s.viewMode === "map" && <MapView s={s} visible={visible} />}
 
       <div style={{ marginTop: 24 }}>
-        <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Select More</button>
+        <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Edit Exemplars</button>
       </div>
     </section>
   );
@@ -705,8 +764,8 @@ function StepSearch({ s, set }) {
 /* ─── App Shell ─────────────────────────────────────────────────────────── */
 
 export default function App() {
-  const { s, set, toggle } = useAppState();
-  const steps = ["Load Data", "Select", "Review", "Search"];
+  const { s, set, togglePos, toggleNeg } = useAppState();
+  const steps = ["Load Data", "Exemplars", "Review", "Results"];
   return (
     <div style={S.root}>
       <header style={S.header}>
@@ -728,9 +787,9 @@ export default function App() {
       </header>
       <main style={S.main}>
         {s.step === 1 && <StepLoad s={s} set={set} />}
-        {s.step === 2 && <StepSelect s={s} set={set} toggle={toggle} />}
-        {s.step === 3 && <StepReview s={s} set={set} />}
-        {s.step === 4 && <StepSearch s={s} set={set} />}
+        {s.step === 2 && <StepSelect s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} />}
+        {s.step === 3 && <StepReview s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} />}
+        {s.step === 4 && <StepSearch s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} />}
       </main>
     </div>
   );
@@ -851,17 +910,6 @@ const S = {
     padding: "10px 12px", display: "flex", justifyContent: "space-between",
     alignItems: "center", fontSize: 14, color: "#6B7280",
   },
-  acceptBtn: {
-    flex: 1, padding: 10, border: "none", borderTop: "1px solid #E2E4E9",
-    background: "#F0FDF4", color: "#16A34A", fontSize: 14, fontWeight: 600,
-    cursor: "pointer", transition: "background 0.15s",
-  },
-  rejectBtn: {
-    flex: 1, padding: 10, border: "none", borderTop: "1px solid #E2E4E9",
-    borderLeft: "1px solid #E2E4E9", background: "#FEF2F2", color: "#DC2626",
-    fontSize: 14, fontWeight: 600, cursor: "pointer", transition: "background 0.15s",
-  },
-
   // Controls bar
   controlBar: {
     display: "flex", gap: 24, alignItems: "flex-end", padding: "16px 20px",
@@ -876,10 +924,6 @@ const S = {
   gallerySection: {},
   gallerySimilar: {
     padding: 20, background: "#F0FDF4", border: "1px solid #BBF7D0",
-    borderRadius: 12,
-  },
-  galleryDissimilar: {
-    padding: 20, background: "#FEF2F2", border: "1px solid #FECACA",
     borderRadius: 12,
   },
   galleryTitleGreen: {
