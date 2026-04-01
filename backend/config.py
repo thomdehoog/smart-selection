@@ -34,3 +34,4 @@ DEFAULT_TOP_K = 200
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = 5050
 UPLOAD_DIR = "uploads"
+PROJECTS_DIR = "projects"
