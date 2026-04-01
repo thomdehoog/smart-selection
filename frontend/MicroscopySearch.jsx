@@ -477,7 +477,7 @@ function StepSelect({ s, set, togglePos, toggleNeg }) {
 
 /* ─── Step 3: Review Classifier ────────────────────────────────────────── */
 
-function StepReview({ s, set, togglePos, toggleNeg }) {
+function StepReview({ s, set, togglePos, toggleNeg, onSave }) {
   const [posCrops, setPosCrops] = useState([]);
   const [negCrops, setNegCrops] = useState([]);
 
@@ -546,6 +546,9 @@ function StepReview({ s, set, togglePos, toggleNeg }) {
       <div style={{ display: "flex", gap: 12 }}>
         <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Back</button>
         <button style={S.btnPrimary} onClick={apply} disabled={s.classifierPos.size === 0}>Apply Classifier</button>
+        <button style={S.btnSave} onClick={onSave} disabled={s.saving}>
+          {s.saving ? "Saving..." : "Save Project"}
+        </button>
       </div>
     </section>
   );
@@ -731,7 +734,7 @@ function MapView({ s, visible }) {
   );
 }
 
-function StepSearch({ s, set, togglePos, toggleNeg }) {
+function StepSearch({ s, set, togglePos, toggleNeg, onSave }) {
   const [posCrops, setPosCrops] = useState([]);
   const [negCrops, setNegCrops] = useState([]);
 
@@ -858,8 +861,11 @@ function StepSearch({ s, set, togglePos, toggleNeg }) {
 
       {s.viewMode === "map" && <MapView s={s} visible={visible} />}
 
-      <div style={{ marginTop: 24 }}>
+      <div style={{ marginTop: 24, display: "flex", gap: 12 }}>
         <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Edit Exemplars</button>
+        <button style={S.btnSave} onClick={onSave} disabled={s.saving}>
+          {s.saving ? "Saving..." : "Save Project"}
+        </button>
       </div>
     </section>
   );
@@ -918,8 +924,8 @@ export default function App() {
       <main style={S.main}>
         {s.step === 1 && <StepLoad s={s} set={set} />}
         {s.step === 2 && <StepSelect s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} />}
-        {s.step === 3 && <StepReview s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} />}
-        {s.step === 4 && <StepSearch s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} />}
+        {s.step === 3 && <StepReview s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} onSave={saveProject} />}
+        {s.step === 4 && <StepSearch s={s} set={set} togglePos={togglePos} toggleNeg={toggleNeg} onSave={saveProject} />}
       </main>
     </div>
   );
@@ -984,6 +990,11 @@ const S = {
     background: "#fff", color: "#374151", border: "1px solid #D1D5DB", borderRadius: 8,
     padding: "10px 20px", fontSize: 14, fontWeight: 500, cursor: "pointer",
     transition: "background 0.15s",
+  },
+  btnSave: {
+    background: "#F0FDF4", color: "#16A34A", border: "1px solid #BBF7D0", borderRadius: 8,
+    padding: "10px 20px", fontSize: 14, fontWeight: 600, cursor: "pointer",
+    transition: "background 0.15s", marginLeft: "auto",
   },
   linkBtn: {
     background: "none", border: "none", color: "#DC2626", fontSize: 13,
