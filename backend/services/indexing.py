@@ -7,10 +7,16 @@ the query-by-example search with positive/negative refinement.
 
 All vectors must be L2-normalized before indexing — this makes inner product
 search equivalent to cosine similarity, which is what we want.
+
+The search function uses variance-weighted similarity: dimensions where
+positive exemplars agree (low variance) are upweighted, and dimensions where
+positives and negatives diverge are further emphasized. This lets the system
+automatically learn which visual features (shape, texture, intensity) the
+user cares about from just a few examples.
 """
 
 import numpy as np
-from config import DEFAULT_TOP_K, DEFAULT_NEGATIVE_ALPHA
+from config import DEFAULT_TOP_K
 
 # Lazy import — faiss segfaults on macOS if imported before torch/cellpose
 faiss = None
@@ -47,108 +53,129 @@ def build_index(embeddings: np.ndarray) -> faiss.Index:
     return index
 
 
+def _compute_dimension_weights(pos_embeddings, neg_embeddings=None):
+    """
+    Compute per-dimension importance weights from exemplar embeddings.
+
+    The weight for each dimension reflects how useful it is for distinguishing
+    what the user is looking for. Two signals are combined:
+
+    1. Positive consistency: dimensions where positives agree (low variance)
+       are likely encoding the feature the user cares about. Weight is
+       inversely proportional to variance among positives.
+
+    2. Discriminative power (if negatives exist): dimensions where the positive
+       and negative means are far apart are especially informative. This signal
+       is added on top of the consistency signal.
+
+    The result is a (D,) weight vector, normalized to sum to D (so that the
+    average weight is 1.0 — preserving the overall scale of similarity scores).
+    """
+    D = pos_embeddings.shape[1]
+
+    if pos_embeddings.shape[0] == 1:
+        # Single positive: no variance info, use uniform weights
+        return np.ones(D, dtype=np.float32)
+
+    # Signal 1: inverse variance among positives (consistency)
+    pos_var = pos_embeddings.var(axis=0) + 1e-8
+    consistency = 1.0 / pos_var
+
+    if neg_embeddings is not None and len(neg_embeddings) > 0:
+        # Signal 2: squared difference of means (discriminative power)
+        pos_mean = pos_embeddings.mean(axis=0)
+        neg_mean = neg_embeddings.mean(axis=0)
+        discrimination = (pos_mean - neg_mean) ** 2
+
+        # Combine: consistency tells us "where positives agree",
+        # discrimination tells us "where positives and negatives differ".
+        # Both are useful — multiply them so a dimension must be consistent
+        # AND discriminative to get high weight.
+        weights = consistency * (1.0 + discrimination / (discrimination.mean() + 1e-8))
+    else:
+        weights = consistency
+
+    # Normalize so weights sum to D (average weight = 1.0)
+    weights = weights * (D / (weights.sum() + 1e-8))
+
+    return weights.astype(np.float32)
+
+
 def search(
     index: faiss.Index,
     embeddings: np.ndarray,
     positive_ids: list,
     negative_ids: list = None,
-    alpha: float = DEFAULT_NEGATIVE_ALPHA,
+    alpha: float = 1.0,
     top_k: int = DEFAULT_TOP_K,
 ) -> tuple:
     """
-    Search for objects similar to positive examples, adjusted away from negatives.
+    Search for objects similar to positive examples using variance-weighted
+    similarity.
 
-    The query vector is computed as:
-        query = mean(positive_embeddings) - alpha * mean(negative_embeddings)
-    then L2-normalized. This is pure vector arithmetic — no retraining.
+    Instead of treating all embedding dimensions equally, this computes
+    per-dimension weights based on where the positive exemplars agree and
+    where they differ from negatives. This lets the system automatically
+    discover which visual features (shape, texture, intensity) matter for
+    the user's current query.
 
-    The positive and negative objects are excluded from results.
+    The weighted search works by:
+    1. Computing dimension weights from exemplar statistics
+    2. Applying sqrt(weights) to both query and all embeddings
+    3. Running standard cosine similarity on the reweighted space
+
+    This is mathematically equivalent to weighted cosine similarity but
+    allows us to use FAISS for fast search.
 
     Args:
-        index: FAISS index
-        embeddings: (N, D) all global embeddings
+        index: FAISS index (used as fallback; bypassed for weighted search)
+        embeddings: (N, D) all global embeddings, L2-normalized
         positive_ids: List of object indices the user selected as interesting
         negative_ids: List of object indices the user rejected (or None)
-        alpha: Strength of negative adjustment (0.0 = ignore, 1.0 = full subtraction)
+        alpha: Strength of negative adjustment (default 1.0)
         top_k: Number of results to return
 
     Returns:
         result_ids: List of object indices, ranked by descending similarity
-        scores: List of corresponding similarity scores (cosine similarity)
+        scores: List of corresponding similarity scores
     """
     negative_ids = negative_ids or []
 
-    # Build query vector from positive examples
     pos_embeddings = embeddings[positive_ids]
+    neg_embeddings = embeddings[negative_ids] if negative_ids else None
+
+    # Compute dimension weights from exemplar statistics
+    weights = _compute_dimension_weights(pos_embeddings, neg_embeddings)
+    sqrt_w = np.sqrt(weights)
+
+    # Build query: weighted centroid of positives, adjusted by negatives
     query = pos_embeddings.mean(axis=0)
+    if neg_embeddings is not None and len(neg_embeddings) > 0:
+        query = query - alpha * neg_embeddings.mean(axis=0)
 
-    # Subtract negative influence
-    if len(negative_ids) > 0:
-        neg_embeddings = embeddings[negative_ids]
-        neg_vec = neg_embeddings.mean(axis=0)
-        query = query - alpha * neg_vec
+    # Apply weights to query and compute weighted similarity against all embeddings
+    # This is equivalent to: sum(w_d * q_d * e_d) for each embedding e
+    weighted_query = query * weights
+    scores = embeddings @ weighted_query
 
-    # L2 normalize the query — required for cosine similarity via inner product
-    norm = np.linalg.norm(query)
-    if norm > 1e-8:
-        query = query / norm
-    query = query.reshape(1, -1).astype(np.float32)
+    # Normalize scores to [0, 1] range for consistency with cosine similarity
+    # by dividing by the weighted norm of the query and each embedding
+    query_wnorm = np.sqrt(np.sum(query ** 2 * weights)) + 1e-8
+    emb_wnorms = np.sqrt(np.sum(embeddings ** 2 * weights[np.newaxis, :], axis=1)) + 1e-8
+    scores = scores / (query_wnorm * emb_wnorms)
 
-    # Search FAISS — request extra results to account for excluded IDs
+    # Exclude exemplars from results
     exclude = set(positive_ids) | set(negative_ids)
-    search_k = top_k + len(exclude) + 10
-    scores, indices = index.search(query, search_k)
+    ranked = np.argsort(-scores)
 
-    # Filter out excluded IDs and invalid indices
-    results = [
-        (int(idx), float(score))
-        for idx, score in zip(indices[0], scores[0])
-        if idx >= 0 and idx not in exclude
-    ]
-
-    result_ids = [r[0] for r in results[:top_k]]
-    result_scores = [r[1] for r in results[:top_k]]
-
-    return result_ids, result_scores
-
-
-def search_dissimilar(
-    index: faiss.Index,
-    embeddings: np.ndarray,
-    positive_ids: list,
-    top_k: int = DEFAULT_TOP_K,
-) -> tuple:
-    """
-    Search for the most dissimilar objects to the positive examples.
-
-    Queries FAISS for ALL objects, then returns the bottom-k by similarity.
-    """
-    _ensure_faiss()
-
-    pos_embeddings = embeddings[positive_ids]
-    query = pos_embeddings.mean(axis=0)
-    norm = np.linalg.norm(query)
-    if norm > 1e-8:
-        query = query / norm
-    query = query.reshape(1, -1).astype(np.float32)
-
-    # Search all objects
-    n_total = index.ntotal
-    scores, indices = index.search(query, n_total)
-
-    # Exclude positives, take the bottom-k (least similar)
-    exclude = set(positive_ids)
-    results = [
-        (int(idx), float(score))
-        for idx, score in zip(indices[0], scores[0])
-        if idx >= 0 and idx not in exclude
-    ]
-
-    # Bottom-k: least similar first
-    bottom = results[-top_k:]
-    bottom.reverse()
-
-    result_ids = [r[0] for r in bottom]
-    result_scores = [r[1] for r in bottom]
+    result_ids = []
+    result_scores = []
+    for idx in ranked:
+        if int(idx) in exclude:
+            continue
+        result_ids.append(int(idx))
+        result_scores.append(float(scores[idx]))
+        if len(result_ids) >= top_k:
+            break
 
     return result_ids, result_scores

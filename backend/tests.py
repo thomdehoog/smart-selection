@@ -337,6 +337,71 @@ class TestEmbeddingUtils:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 4b. Variance-weighted dimension weighting tests (no FAISS needed)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestDimensionWeights:
+    """Tests for the variance-weighted dimension importance computation."""
+
+    def test_single_positive_returns_uniform(self):
+        from services.indexing import _compute_dimension_weights
+        pos = np.random.randn(1, 64).astype(np.float32)
+        w = _compute_dimension_weights(pos)
+        assert w.shape == (64,)
+        np.testing.assert_allclose(w, 1.0, atol=1e-5)
+
+    def test_weights_sum_to_d(self):
+        from services.indexing import _compute_dimension_weights
+        pos = np.random.randn(5, 64).astype(np.float32)
+        w = _compute_dimension_weights(pos)
+        np.testing.assert_allclose(w.sum(), 64.0, atol=0.1)
+
+    def test_consistent_dims_get_higher_weight(self):
+        """Dimensions where positives agree should get higher weight."""
+        from services.indexing import _compute_dimension_weights
+        D = 64
+        pos = np.random.randn(10, D).astype(np.float32)
+        # Make first 10 dims very consistent (low variance)
+        pos[:, :10] = 0.5 + np.random.randn(10, 10).astype(np.float32) * 0.001
+        # Make last 10 dims very noisy (high variance)
+        pos[:, -10:] = np.random.randn(10, 10).astype(np.float32) * 10.0
+
+        w = _compute_dimension_weights(pos)
+        avg_consistent = w[:10].mean()
+        avg_noisy = w[-10:].mean()
+        assert avg_consistent > avg_noisy * 5, \
+            f"Consistent dims ({avg_consistent:.2f}) should be weighted much more than noisy ({avg_noisy:.2f})"
+
+    def test_negatives_boost_discriminative_dims(self):
+        """Dimensions where pos and neg means differ should get extra weight."""
+        from services.indexing import _compute_dimension_weights
+        D = 64
+        # Positives: all similar
+        pos = np.ones((5, D), dtype=np.float32) * 0.5
+        pos += np.random.randn(5, D).astype(np.float32) * 0.01
+
+        # Negatives: same as positives except in first 10 dims
+        neg = pos.copy()[:3]
+        neg[:, :10] = -0.5  # strong divergence in first 10 dims
+
+        w_no_neg = _compute_dimension_weights(pos)
+        w_with_neg = _compute_dimension_weights(pos, neg)
+
+        # First 10 dims should have relatively higher weight with negatives
+        ratio_no_neg = w_no_neg[:10].mean() / w_no_neg[10:].mean()
+        ratio_with_neg = w_with_neg[:10].mean() / w_with_neg[10:].mean()
+        assert ratio_with_neg > ratio_no_neg, \
+            "Discriminative dims should get boosted when negatives are provided"
+
+    def test_weights_are_positive(self):
+        from services.indexing import _compute_dimension_weights
+        pos = np.random.randn(5, 64).astype(np.float32)
+        neg = np.random.randn(3, 64).astype(np.float32)
+        w = _compute_dimension_weights(pos, neg)
+        assert np.all(w > 0), "All weights should be positive"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 5. FAISS indexing and search tests
 # ═══════════════════════════════════════════════════════════════════════════
 
