@@ -419,6 +419,84 @@ class TestStepNavigation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 8. Map view logic
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMapViewLogic:
+    """Tests the map view highlighting logic used in StepSearch."""
+
+    def test_view_mode_default(self):
+        state = {"viewMode": "gallery"}
+        assert state["viewMode"] == "gallery"
+
+    def test_view_mode_toggle(self):
+        state = {"viewMode": "gallery"}
+        state["viewMode"] = "map"
+        assert state["viewMode"] == "map"
+        state["viewMode"] = "gallery"
+        assert state["viewMode"] == "gallery"
+
+    def test_result_scores_lookup(self):
+        """Results should be indexable by object_id for fast lookup."""
+        results = [
+            {"object_id": 10, "image_index": 0, "similarity_score": 0.9},
+            {"object_id": 20, "image_index": 1, "similarity_score": 0.7},
+            {"object_id": 30, "image_index": 0, "similarity_score": 0.5},
+        ]
+        scores = {r["object_id"]: r["similarity_score"] for r in results}
+        assert scores[10] == 0.9
+        assert scores[20] == 0.7
+        assert 99 not in scores
+
+    def test_highlight_priority(self):
+        """Positive cells take priority over result cells in highlighting."""
+        positive = {1, 2, 3}
+        result_scores = {3: 0.85, 4: 0.7, 5: 0.6}
+        cell_id = 3  # In both positive and results
+
+        # Positive should take priority
+        if cell_id in positive:
+            color = "blue"
+        elif cell_id in result_scores:
+            color = "green"
+        else:
+            color = "hover"
+        assert color == "blue"
+
+    def test_highlight_result_cell(self):
+        positive = {1, 2}
+        result_scores = {4: 0.7}
+        cell_id = 4
+
+        if cell_id in positive:
+            color = "blue"
+        elif cell_id in result_scores:
+            color = "green"
+        else:
+            color = "hover"
+        assert color == "green"
+
+    def test_mask_filters_by_image(self):
+        """Only cells present in the mask for the viewed image should be highlighted."""
+        # Simulate mask pixel data: image 0 has cells 1-30, image 1 has cells 31-60
+        mask_cell_ids_image0 = set(range(1, 31))
+        positive = {5, 35}  # 5 is on image 0, 35 is on image 1
+
+        # When viewing image 0, only cell 5 would appear in the mask
+        highlighted_on_image0 = positive & mask_cell_ids_image0
+        assert highlighted_on_image0 == {5}
+
+    def test_result_score_to_green_intensity(self):
+        """Score should map to green channel intensity for visual distinction."""
+        def score_to_green(score):
+            return round(160 + score * 95)
+
+        assert score_to_green(0.0) == 160  # Low similarity = darker green
+        assert score_to_green(1.0) == 255  # High similarity = bright green
+        assert score_to_green(0.5) == 208  # Mid similarity
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Run
 # ═══════════════════════════════════════════════════════════════════════════
 

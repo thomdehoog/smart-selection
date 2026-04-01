@@ -39,7 +39,7 @@ export function useAppState() {
     imgIdx: 0, imageData: null, objects: [],
     selected: new Set(), positive: [], negative: [], results: [], dissimilar: [],
     busy: false, progress: 0, msg: "", error: null,
-    alpha: 0.4, threshold: 0.0,
+    alpha: 0.4, threshold: 0.0, viewMode: "gallery",
   });
   const set = useCallback((p) => setS((prev) => ({ ...prev, ...p })), []);
   const toggle = useCallback((id) => {
@@ -380,6 +380,184 @@ function StepReview({ s, set }) {
 
 /* ─── Step 4: Search ────────────────────────────────────────────────────── */
 
+function MapView({ s, set }) {
+  const canvasRef = useRef(null);
+  const [hovered, setHovered] = useState(null);
+  const [maskData, setMaskData] = useState(null);
+  const [mapImageData, setMapImageData] = useState(null);
+  const [mapImgIdx, setMapImgIdx] = useState(s.imgIdx);
+  const imgRef = useRef(null);
+  const maskImgRef = useRef(null);
+
+  // Build lookups — mask-based rendering naturally filters to current image
+  const resultScores = new Map();
+  for (const r of s.results) resultScores.set(r.object_id, r.similarity_score);
+  const positiveSet = new Set(s.positive);
+
+  useEffect(() => {
+    api.image(mapImgIdx).then(d => setMapImageData(d)).catch(() => {});
+    api.mask(mapImgIdx).then(d => setMaskData(d)).catch(() => {});
+  }, [mapImgIdx]);
+
+  useEffect(() => {
+    if (!maskData) return;
+    const mImg = new window.Image();
+    mImg.onload = () => { maskImgRef.current = mImg; };
+    mImg.src = maskData.mask_base64;
+  }, [maskData]);
+
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || !mapImageData) return;
+    const ctx = cv.getContext("2d");
+    const img = new window.Image();
+    img.onload = () => {
+      imgRef.current = img;
+      cv.width = img.width; cv.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+
+      if (maskImgRef.current) {
+        const mCv = document.createElement("canvas");
+        mCv.width = mapImageData.width; mCv.height = mapImageData.height;
+        const mCtx = mCv.getContext("2d");
+        mCtx.drawImage(maskImgRef.current, 0, 0);
+        const mData = mCtx.getImageData(0, 0, mCv.width, mCv.height).data;
+        const sx = cv.width / mapImageData.width, sy = cv.height / mapImageData.height;
+
+        const brightCv = document.createElement("canvas");
+        brightCv.width = cv.width; brightCv.height = cv.height;
+        brightCv.getContext("2d").drawImage(img, 0, 0);
+
+        const clipCv = document.createElement("canvas");
+        clipCv.width = cv.width; clipCv.height = cv.height;
+        const clipCtx = clipCv.getContext("2d");
+
+        const allHighlight = new Set([...positiveSet]);
+        for (const id of resultScores.keys()) allHighlight.add(id);
+        if (hovered && !allHighlight.has(hovered)) allHighlight.add(hovered);
+
+        if (allHighlight.size > 0) {
+          for (let my = 0; my < mapImageData.height; my++) {
+            for (let mx = 0; mx < mapImageData.width; mx++) {
+              const idx = (my * mapImageData.width + mx) * 4;
+              const cellId = mData[idx] + mData[idx + 1] * 256;
+              if (cellId > 0 && allHighlight.has(cellId)) {
+                const cx = Math.floor(mx * sx), cy = Math.floor(my * sy);
+                const cw = Math.max(Math.ceil(sx), 1), ch = Math.max(Math.ceil(sy), 1);
+                if (hovered === cellId && !positiveSet.has(cellId) && !resultScores.has(cellId)) {
+                  clipCtx.fillStyle = "rgba(200,220,255,0.7)";
+                } else if (positiveSet.has(cellId)) {
+                  clipCtx.fillStyle = "rgba(100,160,255,0.9)";
+                } else if (resultScores.has(cellId)) {
+                  const score = resultScores.get(cellId);
+                  const g = Math.round(160 + score * 95);
+                  clipCtx.fillStyle = `rgba(80,${g},100,0.85)`;
+                } else {
+                  clipCtx.fillStyle = "rgba(200,220,255,0.7)";
+                }
+                clipCtx.fillRect(cx, cy, cw, ch);
+              }
+            }
+          }
+          ctx.globalCompositeOperation = "source-over";
+          clipCtx.globalCompositeOperation = "source-in";
+          clipCtx.drawImage(brightCv, 0, 0);
+          ctx.drawImage(clipCv, 0, 0);
+        }
+      }
+    };
+    img.src = mapImageData.thumbnail_base64;
+  }, [mapImageData, maskData, hovered, s.positive, s.results, s.threshold]);
+
+  const hitTest = (e) => {
+    const cv = canvasRef.current;
+    if (!cv || !mapImageData || !maskImgRef.current) return null;
+    const r = cv.getBoundingClientRect();
+    const mx = Math.floor(((e.clientX - r.left) / r.width) * mapImageData.width);
+    const my = Math.floor(((e.clientY - r.top) / r.height) * mapImageData.height);
+    const mCv = document.createElement("canvas");
+    mCv.width = mapImageData.width; mCv.height = mapImageData.height;
+    const mCtx = mCv.getContext("2d");
+    mCtx.drawImage(maskImgRef.current, 0, 0);
+    const pixel = mCtx.getImageData(mx, my, 1, 1).data;
+    const cellId = pixel[0] + pixel[1] * 256;
+    return cellId > 0 ? cellId : null;
+  };
+
+  const hoveredResult = hovered ? s.results.find(r => r.object_id === hovered) : null;
+  const hoveredIsPositive = hovered && s.positive.includes(hovered);
+
+  return (
+    <div style={{ display: "flex", gap: 20 }}>
+      {/* Image tiles */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+        {Array.from({ length: s.numImages }, (_, i) => (
+          <button key={i} onClick={() => setMapImgIdx(i)}
+            style={{
+              width: 48, height: 48, border: i === mapImgIdx ? "2px solid #2563EB" : "1px solid #D1D5DB",
+              background: i === mapImgIdx ? "#EFF6FF" : "#fff", borderRadius: 10,
+              cursor: "pointer", fontSize: 16, fontWeight: 700,
+              color: i === mapImgIdx ? "#2563EB" : "#6B7280",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              transition: "all 0.15s",
+            }}>{i + 1}</button>
+        ))}
+      </div>
+
+      {/* Canvas */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={S.canvasFrame}>
+          <canvas ref={canvasRef}
+            style={{ width: "100%", display: "block", cursor: "crosshair" }}
+            onMouseMove={e => setHovered(hitTest(e))}
+            onMouseLeave={() => setHovered(null)} />
+        </div>
+      </div>
+
+      {/* Legend + hover info sidebar */}
+      <div style={S.sidebar}>
+        <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 12, color: "#1A1A1A" }}>Legend</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 16, height: 16, borderRadius: 4, background: "rgba(100,160,255,0.9)" }} />
+            <span style={{ fontSize: 13, color: "#374151" }}>Query cells ({positiveSet.size})</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 16, height: 16, borderRadius: 4, background: "rgba(80,220,100,0.85)" }} />
+            <span style={{ fontSize: 13, color: "#374151" }}>Similar results ({resultScores.size})</span>
+          </div>
+        </div>
+
+        {(hoveredResult || hoveredIsPositive) && (
+          <div style={{ padding: 12, background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#111" }}>
+              Cell #{hovered}
+            </div>
+            {hoveredResult && (
+              <div style={{ fontSize: 13, color: "#6B7280", marginTop: 4 }}>
+                Similarity: <span style={{ fontWeight: 600, color: hoveredResult.similarity_score > 0.8 ? "#16A34A" : hoveredResult.similarity_score > 0.5 ? "#CA8A04" : "#DC2626" }}>
+                  {(hoveredResult.similarity_score * 100).toFixed(0)}%
+                </span>
+              </div>
+            )}
+            {hoveredIsPositive && (
+              <div style={{ fontSize: 13, color: "#2563EB", marginTop: 4, fontWeight: 500 }}>Query cell</div>
+            )}
+          </div>
+        )}
+        {!hoveredResult && !hoveredIsPositive && hovered && (
+          <div style={{ padding: 12, background: "#F9FAFB", borderRadius: 8, border: "1px solid #E5E7EB" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#111" }}>Cell #{hovered}</div>
+            <div style={{ fontSize: 13, color: "#9CA3AF", marginTop: 4 }}>Not in results</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StepSearch({ s, set }) {
   const [posCrops, setPosCrops] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -428,70 +606,94 @@ function StepSearch({ s, set }) {
 
   return (
     <section style={S.card}>
-      <h2 style={S.h2}>Search Results</h2>
-      <p style={S.muted}>{s.positive.length} positive · {s.negative.length} rejected · {visible.length} matches</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div>
+          <h2 style={S.h2}>Search Results</h2>
+          <p style={{ ...S.muted, margin: 0 }}>{s.positive.length} positive · {s.negative.length} rejected · {visible.length} matches</p>
+        </div>
+        <div style={{ display: "flex", gap: 4, background: "#F3F4F6", borderRadius: 8, padding: 3 }}>
+          <button
+            onClick={() => set({ viewMode: "gallery" })}
+            style={{
+              ...S.viewToggleBtn,
+              ...(s.viewMode === "gallery" ? S.viewToggleBtnActive : {}),
+            }}>Gallery</button>
+          <button
+            onClick={() => set({ viewMode: "map" })}
+            style={{
+              ...S.viewToggleBtn,
+              ...(s.viewMode === "map" ? S.viewToggleBtnActive : {}),
+            }}>Map</button>
+        </div>
+      </div>
 
-      {/* Selected cells */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, margin: "16px 0 24px" }}>
-        {posCrops.map(c => (
-          <div key={c.object_id} style={{ ...S.resultCard, borderColor: "#2563EB", borderWidth: 2 }}>
-            <div style={S.thumbContainer}>
-              <img src={c.thumbnail_base64} alt="" style={S.thumbImg} />
+      {s.viewMode === "gallery" && (
+        <>
+          {/* Selected cells */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, margin: "16px 0 24px" }}>
+            {posCrops.map(c => (
+              <div key={c.object_id} style={{ ...S.resultCard, borderColor: "#2563EB", borderWidth: 2 }}>
+                <div style={S.thumbContainer}>
+                  <img src={c.thumbnail_base64} alt="" style={S.thumbImg} />
+                </div>
+                <div style={S.cardFooter}>
+                  <span style={{ color: "#2563EB", fontWeight: 600 }}>#{c.object_id}</span>
+                  <button onClick={() => {
+                    const np = s.positive.filter(x => x !== c.object_id);
+                    const ns = new Set(s.selected); ns.delete(c.object_id);
+                    set({ positive: np, selected: ns });
+                  }} style={S.linkBtn}>Remove</button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Controls */}
+          <div style={S.controlBar}>
+            <div style={S.controlGroup}>
+              <label style={S.controlLabel}>Rejection strength ({s.alpha.toFixed(2)})</label>
+              <input type="range" min={0} max={1} step={0.05} value={s.alpha}
+                onChange={e => set({ alpha: +e.target.value })} style={S.slider} />
             </div>
-            <div style={S.cardFooter}>
-              <span style={{ color: "#2563EB", fontWeight: 600 }}>#{c.object_id}</span>
-              <button onClick={() => {
-                const np = s.positive.filter(x => x !== c.object_id);
-                const ns = new Set(s.selected); ns.delete(c.object_id);
-                set({ positive: np, selected: ns });
-              }} style={S.linkBtn}>Remove</button>
+            <div style={S.controlGroup}>
+              <label style={S.controlLabel}>Min similarity ({s.threshold.toFixed(2)})</label>
+              <input type="range" min={0} max={1} step={0.05} value={s.threshold}
+                onChange={e => set({ threshold: +e.target.value })} style={S.slider} />
+            </div>
+            <button style={S.btnPrimary} onClick={recompute} disabled={busy}>
+              {busy ? "Searching..." : "Recompute"}
+            </button>
+          </div>
+
+          {/* Most Similar */}
+          <div style={S.gallerySection}>
+            <div style={S.gallerySimilar}>
+              <h3 style={S.galleryTitleGreen}>Most Similar</h3>
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
+                {mostSimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
+              </div>
+              {mostSimilar.length === 0 && !busy && (
+                <p style={S.emptyMsg}>No results above threshold.</p>
+              )}
             </div>
           </div>
-        ))}
-      </div>
 
-      {/* Controls */}
-      <div style={S.controlBar}>
-        <div style={S.controlGroup}>
-          <label style={S.controlLabel}>Rejection strength ({s.alpha.toFixed(2)})</label>
-          <input type="range" min={0} max={1} step={0.05} value={s.alpha}
-            onChange={e => set({ alpha: +e.target.value })} style={S.slider} />
-        </div>
-        <div style={S.controlGroup}>
-          <label style={S.controlLabel}>Min similarity ({s.threshold.toFixed(2)})</label>
-          <input type="range" min={0} max={1} step={0.05} value={s.threshold}
-            onChange={e => set({ threshold: +e.target.value })} style={S.slider} />
-        </div>
-        <button style={S.btnPrimary} onClick={recompute} disabled={busy}>
-          {busy ? "Searching..." : "Recompute"}
-        </button>
-      </div>
-
-      {/* Most Similar */}
-      <div style={S.gallerySection}>
-        <div style={S.gallerySimilar}>
-          <h3 style={S.galleryTitleGreen}>Most Similar</h3>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
-            {mostSimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
+          {/* Most Dissimilar */}
+          <div style={{ ...S.gallerySection, marginTop: 16 }}>
+            <div style={S.galleryDissimilar}>
+              <h3 style={S.galleryTitleRed}>Most Dissimilar</h3>
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
+                {mostDissimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
+              </div>
+              {mostDissimilar.length === 0 && !busy && (
+                <p style={S.emptyMsg}>No dissimilar results loaded yet.</p>
+              )}
+            </div>
           </div>
-          {mostSimilar.length === 0 && !busy && (
-            <p style={S.emptyMsg}>No results above threshold.</p>
-          )}
-        </div>
-      </div>
+        </>
+      )}
 
-      {/* Most Dissimilar */}
-      <div style={{ ...S.gallerySection, marginTop: 16 }}>
-        <div style={S.galleryDissimilar}>
-          <h3 style={S.galleryTitleRed}>Most Dissimilar</h3>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
-            {mostDissimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
-          </div>
-          {mostDissimilar.length === 0 && !busy && (
-            <p style={S.emptyMsg}>No dissimilar results loaded yet.</p>
-          )}
-        </div>
-      </div>
+      {s.viewMode === "map" && <MapView s={s} set={set} />}
 
       <div style={{ marginTop: 24 }}>
         <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Select More</button>
@@ -690,5 +892,16 @@ const S = {
   },
   emptyMsg: {
     textAlign: "center", color: "#9CA3AF", padding: "32px 0", fontSize: 14,
+  },
+
+  // View toggle
+  viewToggleBtn: {
+    padding: "6px 16px", fontSize: 13, fontWeight: 500, border: "none",
+    background: "transparent", color: "#6B7280", borderRadius: 6,
+    cursor: "pointer", transition: "all 0.15s",
+  },
+  viewToggleBtnActive: {
+    background: "#fff", color: "#111", fontWeight: 600,
+    boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
   },
 };
