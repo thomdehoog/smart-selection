@@ -275,8 +275,9 @@ def search_similar():
     data = request.json
     positive_ids = data.get("positive_ids", [])
     negative_ids = data.get("negative_ids", [])
-    top_k = data.get("top_k", 50)
-    alpha = data.get("negative_alpha", 0.4)
+    top_k = data.get("top_k", 200)
+    alpha = data.get("negative_alpha", 1.0)
+    search_mode = data.get("search_mode", "weighted")
 
     if not positive_ids:
         return jsonify({"error": "At least one positive example required."}), 400
@@ -290,7 +291,7 @@ def search_similar():
     if not pos_indices:
         return jsonify({"error": "None of the positive IDs were found."}), 400
 
-    # Run FAISS search
+    # Run search
     result_indices, result_scores = search(
         state.faiss_index,
         state.global_embeddings,
@@ -298,6 +299,7 @@ def search_similar():
         neg_indices,
         alpha=alpha,
         top_k=top_k,
+        mode=search_mode,
     )
 
     # Convert flat indices back to object IDs and include thumbnails

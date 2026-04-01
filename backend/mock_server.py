@@ -194,32 +194,39 @@ def search():
     if not pos_idx:
         return jsonify({"error": "No valid positive IDs"}), 400
 
+    search_mode = data.get("search_mode", "weighted")
+
     pos_emb = EMBEDDINGS[pos_idx]
     neg_emb = EMBEDDINGS[neg_idx] if neg_idx else None
-
-    # Variance-weighted similarity
-    D = EMBEDDINGS.shape[1]
-    if len(pos_idx) == 1:
-        weights = np.ones(D, dtype=np.float32)
-    else:
-        pos_var = pos_emb.var(axis=0) + 1e-8
-        consistency = 1.0 / pos_var
-        if neg_emb is not None and len(neg_emb) > 0:
-            discrimination = (pos_emb.mean(axis=0) - neg_emb.mean(axis=0)) ** 2
-            weights = consistency * (1.0 + discrimination / (discrimination.mean() + 1e-8))
-        else:
-            weights = consistency
-        weights = weights * (D / (weights.sum() + 1e-8))
 
     query = pos_emb.mean(axis=0)
     if neg_emb is not None and len(neg_emb) > 0:
         query = query - alpha * neg_emb.mean(axis=0)
 
-    weighted_query = query * weights
-    scores = EMBEDDINGS @ weighted_query
-    query_wnorm = np.sqrt(np.sum(query ** 2 * weights)) + 1e-8
-    emb_wnorms = np.sqrt(np.sum(EMBEDDINGS ** 2 * weights[np.newaxis, :], axis=1)) + 1e-8
-    scores = scores / (query_wnorm * emb_wnorms)
+    if search_mode == "centroid":
+        # Simple cosine similarity — all dimensions equal
+        query_norm = query / (np.linalg.norm(query) + 1e-8)
+        scores = EMBEDDINGS @ query_norm
+    else:
+        # Variance-weighted similarity
+        D = EMBEDDINGS.shape[1]
+        if len(pos_idx) == 1:
+            weights = np.ones(D, dtype=np.float32)
+        else:
+            pos_var = pos_emb.var(axis=0) + 1e-8
+            consistency = 1.0 / pos_var
+            if neg_emb is not None and len(neg_emb) > 0:
+                discrimination = (pos_emb.mean(axis=0) - neg_emb.mean(axis=0)) ** 2
+                weights = consistency * (1.0 + discrimination / (discrimination.mean() + 1e-8))
+            else:
+                weights = consistency
+            weights = weights * (D / (weights.sum() + 1e-8))
+
+        weighted_query = query * weights
+        scores = EMBEDDINGS @ weighted_query
+        query_wnorm = np.sqrt(np.sum(query ** 2 * weights)) + 1e-8
+        emb_wnorms = np.sqrt(np.sum(EMBEDDINGS ** 2 * weights[np.newaxis, :], axis=1)) + 1e-8
+        scores = scores / (query_wnorm * emb_wnorms)
 
     exclude = set(pos_ids) | set(neg_ids)
     ranked = np.argsort(-scores)

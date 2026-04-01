@@ -108,64 +108,79 @@ def search(
     negative_ids: list = None,
     alpha: float = 1.0,
     top_k: int = DEFAULT_TOP_K,
+    mode: str = "weighted",
 ) -> tuple:
     """
-    Search for objects similar to positive examples using variance-weighted
-    similarity.
+    Search for objects similar to positive examples.
 
-    Instead of treating all embedding dimensions equally, this computes
-    per-dimension weights based on where the positive exemplars agree and
-    where they differ from negatives. This lets the system automatically
-    discover which visual features (shape, texture, intensity) matter for
-    the user's current query.
-
-    The weighted search works by:
-    1. Computing dimension weights from exemplar statistics
-    2. Applying sqrt(weights) to both query and all embeddings
-    3. Running standard cosine similarity on the reweighted space
-
-    This is mathematically equivalent to weighted cosine similarity but
-    allows us to use FAISS for fast search.
+    Supports two modes:
+    - "weighted": Variance-weighted similarity. Automatically learns which
+      embedding dimensions matter based on exemplar statistics. Dimensions
+      where positives agree are upweighted; dimensions where positives and
+      negatives diverge are further emphasized.
+    - "centroid": Simple centroid-based search. Averages positive embeddings,
+      subtracts negatives, and ranks by cosine similarity. All dimensions
+      treated equally.
 
     Args:
-        index: FAISS index (used as fallback; bypassed for weighted search)
+        index: FAISS index (used for centroid mode)
         embeddings: (N, D) all global embeddings, L2-normalized
         positive_ids: List of object indices the user selected as interesting
         negative_ids: List of object indices the user rejected (or None)
         alpha: Strength of negative adjustment (default 1.0)
         top_k: Number of results to return
+        mode: "weighted" or "centroid"
 
     Returns:
         result_ids: List of object indices, ranked by descending similarity
         scores: List of corresponding similarity scores
     """
     negative_ids = negative_ids or []
+    exclude = set(positive_ids) | set(negative_ids)
 
     pos_embeddings = embeddings[positive_ids]
     neg_embeddings = embeddings[negative_ids] if negative_ids else None
 
-    # Compute dimension weights from exemplar statistics
-    weights = _compute_dimension_weights(pos_embeddings, neg_embeddings)
-    sqrt_w = np.sqrt(weights)
-
-    # Build query: weighted centroid of positives, adjusted by negatives
+    # Build base query: centroid of positives, adjusted by negatives
     query = pos_embeddings.mean(axis=0)
     if neg_embeddings is not None and len(neg_embeddings) > 0:
         query = query - alpha * neg_embeddings.mean(axis=0)
 
-    # Apply weights to query and compute weighted similarity against all embeddings
-    # This is equivalent to: sum(w_d * q_d * e_d) for each embedding e
-    weighted_query = query * weights
-    scores = embeddings @ weighted_query
+    if mode == "centroid":
+        # Simple cosine similarity — use FAISS if available
+        norm = np.linalg.norm(query)
+        if norm > 1e-8:
+            query = query / norm
+        query_2d = query.reshape(1, -1).astype(np.float32)
 
-    # Normalize scores to [0, 1] range for consistency with cosine similarity
-    # by dividing by the weighted norm of the query and each embedding
-    query_wnorm = np.sqrt(np.sum(query ** 2 * weights)) + 1e-8
-    emb_wnorms = np.sqrt(np.sum(embeddings ** 2 * weights[np.newaxis, :], axis=1)) + 1e-8
-    scores = scores / (query_wnorm * emb_wnorms)
+        if index is not None:
+            search_k = top_k + len(exclude) + 10
+            scores_arr, indices_arr = index.search(query_2d, search_k)
+            result_ids = []
+            result_scores = []
+            for idx, score in zip(indices_arr[0], scores_arr[0]):
+                if int(idx) < 0 or int(idx) in exclude:
+                    continue
+                result_ids.append(int(idx))
+                result_scores.append(float(score))
+                if len(result_ids) >= top_k:
+                    break
+            return result_ids, result_scores
+        else:
+            # Fallback: brute force
+            scores = embeddings @ query
+    else:
+        # Variance-weighted similarity
+        weights = _compute_dimension_weights(pos_embeddings, neg_embeddings)
 
-    # Exclude exemplars from results
-    exclude = set(positive_ids) | set(negative_ids)
+        weighted_query = query * weights
+        scores = embeddings @ weighted_query
+
+        # Normalize to [0, 1] range (weighted cosine similarity)
+        query_wnorm = np.sqrt(np.sum(query ** 2 * weights)) + 1e-8
+        emb_wnorms = np.sqrt(np.sum(embeddings ** 2 * weights[np.newaxis, :], axis=1)) + 1e-8
+        scores = scores / (query_wnorm * emb_wnorms)
+
     ranked = np.argsort(-scores)
 
     result_ids = []
