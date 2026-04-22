@@ -258,7 +258,54 @@ the existing card / button / slider styles everywhere else.
 
 ---
 
-## 8. Open questions before I start coding
+## 8. Design & quality bar
+
+The end result should look and feel like a simple, clean, professional,
+production-ready tool — not a demo, not a research notebook. Concretely:
+
+- **Same tech stack.** Stay on the current stack — one React component in
+  `frontend/MicroscopySearch.jsx` with inline CSS-in-JS in the `S` object,
+  Flask in `backend/app.py`. No new frameworks, no CSS framework (Tailwind
+  etc.), no component library (MUI, Radix, shadcn, etc.), no state library
+  (keep `useAppState`), no new build tooling.
+- **Visual restraint.** Reuse the existing palette, Inter font, and card /
+  button / slider styles from the `S` style object in
+  `frontend/MicroscopySearch.jsx` (lines 539–693). Add only what's needed
+  (`S.select`, a small `S.segmented` for the mode toggle). No gradients, no
+  decorative icons, no emoji.
+- **Consistent layout.** Every step is one card (`S.card`), same padding,
+  same heading (`S.h2`) + subcopy (`S.muted`) pattern. The per-step method
+  dropdown sits at the top of each card, immediately below the subcopy, so
+  the "pick a method" affordance is the same muscle memory across all
+  three steps.
+- **Honest states.** Loading, empty, error, and "backend not wired" states
+  are all first-class. Disabled dropdown options render with a short hint
+  next to them (e.g. "needs separate env"). Stub modes render their full
+  intended UI greyed out with a single banner explaining what's missing —
+  never fake data.
+- **Keyboard & focus.** Native `<select>`, `<input>`, `<button>` — no
+  custom combobox. Visible focus rings. Tab order follows reading order.
+- **Responsiveness within reason.** The canvas + gallery + sidebar layout
+  should hold together down to ~1280px wide. Below that, stack vertically
+  rather than squashing. No mobile design needed.
+- **Performance.** The mask-overlay pass already scans every pixel in JS
+  (`MicroscopySearch.jsx:235–246`); keep that pattern but precompute the
+  per-id color table once per mask load, and cache the offscreen color
+  canvas so the opacity slider doesn't re-color on every frame — only the
+  `globalAlpha` changes.
+- **Copy.** Labels and subcopy are terse and precise. "Cellpose-SAM", not
+  "🧬 AI-Powered Cell Segmentation". "Find similar", not "Discover more
+  cells like these!". Buttons are verbs.
+- **No dead code, no TODO comments.** Stubs render real UI and call real
+  (if disabled) controls; the "not implemented" story lives in the banner
+  text, not in `// TODO` scatter.
+- **Tests don't regress.** `backend/tests.py` (30 tests) and
+  `frontend/tests_frontend_logic.py` (35 tests) should still pass. New
+  backend endpoint gets at least one happy-path and one error-path test.
+
+---
+
+## 9. Open questions before I start coding
 
 1. Color palette for the mask overlay — golden-angle HSL works well; OK to
    just pick sensible defaults, or do you want a specific palette?
