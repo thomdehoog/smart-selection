@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { Component, useCallback, useEffect, useRef, useState } from "react";
 
 const API = "http://localhost:5050/api";
 
@@ -7,8 +7,13 @@ async function apiFetch(path, options = {}) {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON response */ }
+  if (!res.ok) {
+    const msg = body && body.error ? body.error : `${res.status} ${res.statusText}`.trim();
+    throw new Error(msg);
+  }
+  return body ?? {};
 }
 
 export const api = {
@@ -41,10 +46,13 @@ export const api = {
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
 
+// Preset paths default to the repo-root `bbbc021_raw/…` folder that the
+// project README points at. The field is editable when the user picks
+// "Custom path…"; presets are read-only.
 const DATASET_PRESETS = {
   bbbc021_week1: {
     label: "BBBC021 Week 1",
-    path: "/Users/thomdehoog/Library/CloudStorage/Dropbox/Projects/smart-selection/microscopy-search/bbbc021_raw/Week1_22123/",
+    path: "./bbbc021_raw/Week1_22123/",
   },
 };
 
@@ -178,7 +186,6 @@ function StepDataset({ s, set }) {
     setLoading(true); set({ error: null });
     try {
       const r = await api.upload(s.datasetPath, s.n);
-      if (r.error) { set({ error: r.error }); setLoading(false); return; }
       set({
         datasetId: r.dataset_id,
         numImages: r.num_images,
@@ -193,8 +200,9 @@ function StepDataset({ s, set }) {
       });
     } catch (e) {
       set({ error: e.message });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const isPreset = s.datasetSource in DATASET_PRESETS;
@@ -267,20 +275,18 @@ function StepSegmentation({ s, set }) {
   const colorCvRef = useRef(null);       // Offscreen RGBA canvas with colored mask
   const [rawImg, setRawImg] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
-  const pollRef = useRef(null);
-
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   // Load the raw image for the currently-selected preview tile
   useEffect(() => {
     let cancelled = false;
     setRawImg(null);
     api.image(s.previewImgIdx).then(d => {
-      if (cancelled) return;
-      setRawImg(d);
-    }).catch(() => {});
+      if (!cancelled) setRawImg(d);
+    }).catch(e => {
+      if (!cancelled) set({ error: e.message });
+    });
     return () => { cancelled = true; };
-  }, [s.previewImgIdx]);
+  }, [s.previewImgIdx, set]);
 
   // When raw image arrives, draw it on the canvas.
   useEffect(() => {
@@ -354,39 +360,18 @@ function StepSegmentation({ s, set }) {
     setLoadingPreview(true); set({ error: null });
     try {
       const d = await api.segmentPreview(s.previewImgIdx);
-      if (d.error) set({ error: d.error });
-      else set({ previewMaskData: d, previewNumCells: d.num_cells });
+      set({ previewMaskData: d, previewNumCells: d.num_cells });
     } catch (e) {
       set({ error: e.message });
+    } finally {
+      setLoadingPreview(false);
     }
-    setLoadingPreview(false);
   };
 
-  const continueToSelection = async () => {
-    set({ pipelineStatus: "running", progress: 0, msg: "Starting pipeline…", error: null, step: 3 });
-    try {
-      await api.process(s.cropMode, s.sizeInvariant, s.rotationInvariant);
-      pollRef.current = setInterval(async () => {
-        try {
-          const st = await api.status();
-          set({ progress: st.progress || 0, msg: st.message || "" });
-          if (st.status === "complete") {
-            clearInterval(pollRef.current);
-            const img = await api.image(0);
-            const obj = await api.objects(0);
-            set({ pipelineStatus: "done", imageData: img, objects: obj.objects || [], imgIdx: 0 });
-          } else if (st.status === "error") {
-            clearInterval(pollRef.current);
-            set({ pipelineStatus: "error", error: st.error });
-          }
-        } catch (e) {
-          clearInterval(pollRef.current);
-          set({ pipelineStatus: "error", error: e.message });
-        }
-      }, 1500);
-    } catch (e) {
-      set({ pipelineStatus: "error", error: e.message });
-    }
+  const continueToSelection = () => {
+    // App owns the pipeline lifecycle — it polls /status as a top-level
+    // effect keyed on pipelineStatus, which survives navigating to Step 3.
+    set({ pipelineStatus: "starting", progress: 0, msg: "Starting pipeline…", error: null, step: 3 });
   };
 
   const tiles = Array.from({ length: s.numImages }, (_, i) => i);
@@ -524,98 +509,144 @@ function SelectionGallery({ s, set }) {
   );
 }
 
+function ResultCard({ r, onAccept, onReject }) {
+  return (
+    <div style={S.resultCard}>
+      <div style={S.thumbContainer}>
+        <img src={r.thumbnail_base64} alt="" style={S.thumbImg} />
+      </div>
+      <div style={S.cardFooter}>
+        <span>#{r.object_id}</span>
+        <span style={{ fontWeight: 600, color: scoreColor(r.similarity_score) }}>
+          {(r.similarity_score * 100).toFixed(0)}%
+        </span>
+      </div>
+      <div style={{ display: "flex" }}>
+        <button onClick={() => onAccept(r.object_id)} style={S.acceptBtn}>Similar</button>
+        <button onClick={() => onReject(r.object_id)} style={S.rejectBtn}>Dissimilar</button>
+      </div>
+    </div>
+  );
+}
+
 function SimilarityPanel({ s, set, toggle }) {
   const canvasRef = useRef(null);
-  const [maskData, setMaskData] = useState(null);
-  const maskImgRef = useRef(null);
+  // Cached offscreen state — invalidated when the tile changes.
+  const maskPixelsRef = useRef(null);   // Uint8ClampedArray of the mask PNG (id-encoded)
+  const rawImgRef = useRef(null);       // decoded HTMLImageElement for the raw tile
   const [hovered, setHovered] = useState(null);
   const [busy, setBusy] = useState(false);
+  const loadSeqRef = useRef(0);         // increments on each tile load to discard stale responses
 
+  // Load raw image + mask as one transaction per tile change. Stale
+  // responses (user clicked away before they resolved) are ignored via
+  // the sequence counter.
   useEffect(() => {
-    if (s.imageData == null) return;
-    api.mask(s.imgIdx).then(d => setMaskData(d)).catch(() => {});
-  }, [s.imgIdx, s.imageData]);
+    if (!s.imageData) return;
+    const seq = ++loadSeqRef.current;
+    maskPixelsRef.current = null;
+    rawImgRef.current = null;
 
-  useEffect(() => {
-    if (!maskData) return;
-    const mImg = new window.Image();
-    mImg.onload = () => { maskImgRef.current = mImg; };
-    mImg.src = maskData.mask_base64;
-  }, [maskData]);
-
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || !s.imageData) return;
-    const ctx = cv.getContext("2d");
-    const img = new window.Image();
-    img.onload = () => {
-      cv.width = img.width; cv.height = img.height;
-      ctx.drawImage(img, 0, 0);
-      ctx.fillStyle = "rgba(0,0,0,0.4)";
-      ctx.fillRect(0, 0, cv.width, cv.height);
-
-      if (maskImgRef.current) {
-        const w = s.imageData.width, h = s.imageData.height;
-        const mCv = document.createElement("canvas");
-        mCv.width = w; mCv.height = h;
-        const mCtx = mCv.getContext("2d");
-        mCtx.drawImage(maskImgRef.current, 0, 0);
-        const mData = mCtx.getImageData(0, 0, w, h).data;
-        const sx = cv.width / w, sy = cv.height / h;
-
-        const brightCv = document.createElement("canvas");
-        brightCv.width = cv.width; brightCv.height = cv.height;
-        brightCv.getContext("2d").drawImage(img, 0, 0);
-
-        const clipCv = document.createElement("canvas");
-        clipCv.width = cv.width; clipCv.height = cv.height;
-        const clipCtx = clipCv.getContext("2d");
-
-        const highlight = new Set([...s.selected]);
-        if (hovered && !highlight.has(hovered)) highlight.add(hovered);
-
-        if (highlight.size > 0) {
-          for (let my = 0; my < h; my++) {
-            for (let mx = 0; mx < w; mx++) {
-              const idx = (my * w + mx) * 4;
-              const id = mData[idx] + mData[idx + 1] * 256;
-              if (id > 0 && highlight.has(id)) {
-                const cx = Math.floor(mx * sx), cy = Math.floor(my * sy);
-                const cw = Math.max(Math.ceil(sx), 1), ch = Math.max(Math.ceil(sy), 1);
-                clipCtx.fillStyle = hovered === id && !s.selected.has(id)
-                  ? "rgba(200,220,255,0.7)" : "white";
-                clipCtx.fillRect(cx, cy, cw, ch);
-              }
-            }
-          }
-          clipCtx.globalCompositeOperation = "source-in";
-          clipCtx.drawImage(brightCv, 0, 0);
-          ctx.drawImage(clipCv, 0, 0);
-        }
-      }
+    const rawImg = new window.Image();
+    rawImg.onload = () => {
+      if (seq !== loadSeqRef.current) return;
+      rawImgRef.current = rawImg;
+      drawSelection();
     };
-    img.src = s.imageData.thumbnail_base64;
-  }, [s.imageData, s.selected, hovered, maskData]);
+    rawImg.src = s.imageData.thumbnail_base64;
+
+    api.mask(s.imgIdx).then(d => {
+      if (seq !== loadSeqRef.current) return;
+      const mImg = new window.Image();
+      mImg.onload = () => {
+        if (seq !== loadSeqRef.current) return;
+        const w = mImg.width, h = mImg.height;
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(mImg, 0, 0);
+        maskPixelsRef.current = {
+          w, h, data: ctx.getImageData(0, 0, w, h).data,
+        };
+        drawSelection();
+      };
+      mImg.src = d.mask_base64;
+    }).catch(e => set({ error: e.message }));
+    // drawSelection intentionally not in deps (reads refs on each call).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.imageData, s.imgIdx, set]);
+
+  // Redraw whenever the selection or hover changes, using the cached raw
+  // image + mask buffer. No PNG decoding, no extra fetches.
+  useEffect(() => { drawSelection(); /* eslint-disable-next-line */ }, [s.selected, hovered]);
+
+  const drawSelection = () => {
+    const cv = canvasRef.current;
+    const raw = rawImgRef.current;
+    const mask = maskPixelsRef.current;
+    if (!cv || !raw) return;
+
+    cv.width = raw.width; cv.height = raw.height;
+    const ctx = cv.getContext("2d");
+    ctx.drawImage(raw, 0, 0);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    if (!mask) return;
+
+    const highlight = new Set(s.selected);
+    if (hovered && !highlight.has(hovered)) highlight.add(hovered);
+    if (highlight.size === 0) return;
+
+    const { w, h, data } = mask;
+    const sx = cv.width / w, sy = cv.height / h;
+    const cw = Math.max(Math.ceil(sx), 1), ch = Math.max(Math.ceil(sy), 1);
+
+    const brightCv = document.createElement("canvas");
+    brightCv.width = cv.width; brightCv.height = cv.height;
+    brightCv.getContext("2d").drawImage(raw, 0, 0);
+
+    const clipCv = document.createElement("canvas");
+    clipCv.width = cv.width; clipCv.height = cv.height;
+    const clipCtx = clipCv.getContext("2d");
+
+    for (let my = 0; my < h; my++) {
+      for (let mx = 0; mx < w; mx++) {
+        const idx = (my * w + mx) * 4;
+        const id = data[idx] + data[idx + 1] * 256;
+        if (id === 0 || !highlight.has(id)) continue;
+        clipCtx.fillStyle = hovered === id && !s.selected.has(id)
+          ? "rgba(200,220,255,0.7)" : "white";
+        clipCtx.fillRect(Math.floor(mx * sx), Math.floor(my * sy), cw, ch);
+      }
+    }
+    clipCtx.globalCompositeOperation = "source-in";
+    clipCtx.drawImage(brightCv, 0, 0);
+    ctx.drawImage(clipCv, 0, 0);
+  };
 
   const hitTest = (e) => {
     const cv = canvasRef.current;
-    if (!cv || !s.imageData || !maskImgRef.current) return null;
+    const mask = maskPixelsRef.current;
+    if (!cv || !mask) return null;
     const r = cv.getBoundingClientRect();
-    const mx = Math.floor(((e.clientX - r.left) / r.width) * s.imageData.width);
-    const my = Math.floor(((e.clientY - r.top) / r.height) * s.imageData.height);
-    const mCv = document.createElement("canvas");
-    mCv.width = s.imageData.width; mCv.height = s.imageData.height;
-    const mCtx = mCv.getContext("2d");
-    mCtx.drawImage(maskImgRef.current, 0, 0);
-    const pixel = mCtx.getImageData(mx, my, 1, 1).data;
-    const id = pixel[0] + pixel[1] * 256;
+    const mx = Math.floor(((e.clientX - r.left) / r.width) * mask.w);
+    const my = Math.floor(((e.clientY - r.top) / r.height) * mask.h);
+    if (mx < 0 || my < 0 || mx >= mask.w || my >= mask.h) return null;
+    const idx = (my * mask.w + mx) * 4;
+    const id = mask.data[idx] + mask.data[idx + 1] * 256;
     return id > 0 ? id : null;
   };
 
   const switchTile = async (i) => {
-    const [img, obj] = await Promise.all([api.image(i), api.objects(i)]);
-    setMaskData(null);
-    set({ imageData: img, objects: obj.objects || [], imgIdx: i });
+    if (i === s.imgIdx) return;
+    const seq = ++loadSeqRef.current;
+    try {
+      const [img, obj] = await Promise.all([api.image(i), api.objects(i)]);
+      if (seq !== loadSeqRef.current) return;
+      set({ imageData: img, objects: obj.objects || [], imgIdx: i });
+    } catch (e) {
+      if (seq === loadSeqRef.current) set({ error: e.message });
+    }
   };
 
   const search = async () => {
@@ -655,24 +686,6 @@ function SimilarityPanel({ s, set, toggle }) {
   const COLS = 5, MAX_ROWS = 4, LIMIT = COLS * MAX_ROWS;
   const mostSimilar = visible.slice(0, LIMIT);
   const mostDissimilar = s.dissimilar.slice(0, LIMIT);
-
-  const ResultCard = ({ r }) => (
-    <div style={S.resultCard}>
-      <div style={S.thumbContainer}>
-        <img src={r.thumbnail_base64} alt="" style={S.thumbImg} />
-      </div>
-      <div style={S.cardFooter}>
-        <span>#{r.object_id}</span>
-        <span style={{ fontWeight: 600, color: scoreColor(r.similarity_score) }}>
-          {(r.similarity_score * 100).toFixed(0)}%
-        </span>
-      </div>
-      <div style={{ display: "flex" }}>
-        <button onClick={() => accept(r.object_id)} style={S.acceptBtn}>Similar</button>
-        <button onClick={() => reject(r.object_id)} style={S.rejectBtn}>Dissimilar</button>
-      </div>
-    </div>
-  );
 
   const tiles = Array.from({ length: s.numImages }, (_, i) => i);
 
@@ -732,14 +745,14 @@ function SimilarityPanel({ s, set, toggle }) {
           <div style={S.gallerySimilar}>
             <h3 style={S.galleryTitleGreen}>Most similar</h3>
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
-              {mostSimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
+              {mostSimilar.map(r => <ResultCard key={r.object_id} r={r} onAccept={accept} onReject={reject} />)}
             </div>
             {mostSimilar.length === 0 && <p style={S.emptyMsg}>No results above threshold.</p>}
           </div>
           <div style={S.galleryDissimilar}>
             <h3 style={S.galleryTitleRed}>Most dissimilar</h3>
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
-              {mostDissimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
+              {mostDissimilar.map(r => <ResultCard key={r.object_id} r={r} onAccept={accept} onReject={reject} />)}
             </div>
             {mostDissimilar.length === 0 && <p style={S.emptyMsg}>No dissimilar results yet.</p>}
           </div>
@@ -823,25 +836,32 @@ function ClusteringPanel() {
 
 function StepSelection({ s, set, toggle }) {
   if (s.pipelineStatus !== "done") {
-    const subtitle =
-      s.pipelineStatus === "running"
-        ? "Running segmentation and embedding on all tiles."
-        : s.pipelineStatus === "error"
-        ? "Pipeline failed. Go back and try again."
-        : "Finish segmentation before picking cells.";
+    const running = s.pipelineStatus === "starting" || s.pipelineStatus === "running";
+    const failed = s.pipelineStatus === "error";
+    const subtitle = running
+      ? "Running segmentation and embedding on all tiles."
+      : failed
+      ? "Pipeline failed. Go back to segmentation or retry with the same settings."
+      : "Finish segmentation before picking cells.";
+    const retry = () => set({ pipelineStatus: "starting", progress: 0, msg: "", error: null });
     return (
       <SectionBar title="Cell Selection" subtitle={subtitle}
         actions={
-          <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>
-            Back to Segmentation
-          </button>
+          <>
+            <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>
+              Back to Segmentation
+            </button>
+            {failed && (
+              <button style={S.btnPrimary} onClick={retry}>Retry</button>
+            )}
+          </>
         }>
-        {s.pipelineStatus === "running" && (
+        {running && (
           <div>
             <div style={S.progressTrack}>
               <div style={{ ...S.progressFill, width: `${(s.progress || 0) * 100}%` }} />
             </div>
-            <p style={{ ...S.caption, marginTop: 8 }}>{s.msg}</p>
+            <p style={{ ...S.caption, marginTop: 8 }}>{s.msg || "Preparing…"}</p>
           </div>
         )}
         {s.error && <p style={S.errorText}>{s.error}</p>}
@@ -877,47 +897,128 @@ export function scoreColor(v) {
 
 /* ─── App shell ─────────────────────────────────────────────────────────── */
 
+const POLL_INTERVAL_MS = 1500;
+
+// Polls /api/status whenever pipelineStatus === "running".
+// Lives at App scope so it survives navigating between steps.
+function usePipelinePolling(s, set) {
+  useEffect(() => {
+    if (s.pipelineStatus === "starting") {
+      let cancelled = false;
+      api.process(s.cropMode, s.sizeInvariant, s.rotationInvariant)
+        .then(() => { if (!cancelled) set({ pipelineStatus: "running" }); })
+        .catch(e => { if (!cancelled) set({ pipelineStatus: "error", error: e.message }); });
+      return () => { cancelled = true; };
+    }
+    if (s.pipelineStatus !== "running") return;
+
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const st = await api.status();
+        if (cancelled) return;
+        set({ progress: st.progress || 0, msg: st.message || "" });
+        if (st.status === "complete") {
+          const [img, obj] = await Promise.all([api.image(0), api.objects(0)]);
+          if (!cancelled) {
+            set({
+              pipelineStatus: "done",
+              imageData: img,
+              objects: obj.objects || [],
+              imgIdx: 0,
+            });
+          }
+        } else if (st.status === "error") {
+          set({ pipelineStatus: "error", error: st.error || "Pipeline failed." });
+        }
+      } catch (e) {
+        if (!cancelled) set({ pipelineStatus: "error", error: e.message });
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, POLL_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [s.pipelineStatus, s.cropMode, s.sizeInvariant, s.rotationInvariant, set]);
+}
+
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) {
+    // eslint-disable-next-line no-console
+    console.error("Uncaught render error:", error, info);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={{ ...S.root, padding: 24 }}>
+        <div style={S.section}>
+          <div style={{ ...S.sectionHeader, borderLeftColor: "#DC2626" }}>
+            <h2 style={{ ...S.sectionTitle, color: "#DC2626" }}>Something went wrong</h2>
+          </div>
+          <div style={S.sectionBody}>
+            <p style={S.muted}>
+              The app hit an unrecoverable rendering error. Reload the page to
+              recover. If this keeps happening, check the browser console.
+            </p>
+            <pre style={S.errorPre}>{String(this.state.error && this.state.error.message)}</pre>
+            <button style={S.btnPrimary} onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
 export default function App() {
   const { s, set, toggle } = useAppState();
+  usePipelinePolling(s, set);
+
   const steps = ["Dataset", "Segmentation", "Selection"];
   const canNav = (target) => {
     if (target === 1) return true;
     if (target === 2) return s.datasetId != null;
-    if (target === 3) return s.pipelineStatus === "done" || s.pipelineStatus === "running" || s.pipelineStatus === "error";
+    if (target === 3) return ["starting", "running", "done", "error"].includes(s.pipelineStatus);
     return false;
   };
+
   return (
-    <div style={S.root}>
-      <div style={S.headerWrap}>
-        <header style={S.header}>
-          <span style={S.logo}>Smart Selection</span>
-          <nav style={{ display: "flex", gap: 2 }}>
-            {steps.map((label, i) => {
-              const idx = i + 1;
-              const reachable = canNav(idx);
-              return (
-                <span key={idx}
-                  onClick={() => { if (reachable) set({ step: idx }); }}
-                  style={{
-                    ...S.stepPill,
-                    ...(s.step === idx ? S.stepPillActive : {}),
-                    ...(s.step > idx ? S.stepPillDone : {}),
-                    cursor: reachable ? "pointer" : "default",
-                    opacity: reachable ? 1 : 0.45,
-                  }}>
-                  {idx}. {label}
-                </span>
-              );
-            })}
-          </nav>
-        </header>
+    <ErrorBoundary>
+      <div style={S.root}>
+        <div style={S.headerWrap}>
+          <header style={S.header}>
+            <span style={S.logo}>Smart Selection</span>
+            <nav style={{ display: "flex", gap: 2 }}>
+              {steps.map((label, i) => {
+                const idx = i + 1;
+                const reachable = canNav(idx);
+                return (
+                  <span key={idx}
+                    onClick={() => { if (reachable) set({ step: idx }); }}
+                    style={{
+                      ...S.stepPill,
+                      ...(s.step === idx ? S.stepPillActive : {}),
+                      ...(s.step > idx ? S.stepPillDone : {}),
+                      cursor: reachable ? "pointer" : "default",
+                      opacity: reachable ? 1 : 0.45,
+                    }}>
+                    {idx}. {label}
+                  </span>
+                );
+              })}
+            </nav>
+          </header>
+        </div>
+        <main style={S.main}>
+          {s.step === 1 && <StepDataset s={s} set={set} />}
+          {s.step === 2 && <StepSegmentation s={s} set={set} />}
+          {s.step === 3 && <StepSelection s={s} set={set} toggle={toggle} />}
+        </main>
       </div>
-      <main style={S.main}>
-        {s.step === 1 && <StepDataset s={s} set={set} />}
-        {s.step === 2 && <StepSegmentation s={s} set={set} />}
-        {s.step === 3 && <StepSelection s={s} set={set} toggle={toggle} />}
-      </main>
-    </div>
+    </ErrorBoundary>
   );
 }
 
@@ -1035,6 +1136,11 @@ const S = {
   progressTrack: { height: 8, background: "#E5E7EB", borderRadius: 4, overflow: "hidden" },
   progressFill: { height: "100%", background: "#2563EB", borderRadius: 4, transition: "width 0.4s ease" },
   errorText: { color: "#DC2626", fontSize: 13, marginTop: 12, fontWeight: 500 },
+  errorPre: {
+    background: "#FEF2F2", border: "1px solid #FECACA", color: "#991B1B",
+    borderRadius: 8, padding: 12, fontSize: 12, fontFamily: "ui-monospace, monospace",
+    whiteSpace: "pre-wrap", wordBreak: "break-word", margin: "12px 0",
+  },
 
   // Tile row
   tileRow: { display: "flex", flexWrap: "wrap", gap: 6 },
