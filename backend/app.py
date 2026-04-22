@@ -15,6 +15,7 @@ from config import FLASK_HOST, FLASK_PORT, UPLOAD_DIR
 from models.dataset import create_dataset, get_dataset, DatasetState
 from services.image_io import load_bbbc021_first_n, make_thumbnail
 from services.indexing import search, search_dissimilar
+from services.segmentation import segment_cells
 from pipeline import run_pipeline_async
 
 import io
@@ -125,6 +126,53 @@ def get_status():
         "message": state.progress_message,
         "num_objects": state.num_objects(),
         "error": state.error,
+    })
+
+
+# ─── Segmentation Preview ──────────────────────────────────────────────────
+
+@app.route("/api/segment_preview", methods=["POST"])
+def segment_preview():
+    """
+    Run single-tile segmentation on one loaded image without mutating state.
+
+    Returns a base64-encoded PNG of the label mask using the same R/G id
+    encoding as /api/mask/<i>, so the frontend can reuse its colouring code.
+
+    Request JSON:
+        image_index: int — index into the currently loaded images list
+    """
+    state = get_dataset()
+    if state is None or not state.images:
+        return jsonify({"error": "No dataset loaded. Call /api/upload_bbbc021 first."}), 400
+
+    data = request.json or {}
+    image_index = data.get("image_index")
+    if not isinstance(image_index, int):
+        return jsonify({"error": "image_index (int) is required."}), 400
+    if image_index < 0 or image_index >= state.num_images():
+        return jsonify({"error": f"image_index out of range (0..{state.num_images() - 1})."}), 400
+
+    image = state.images[image_index]
+    result = segment_cells(image)
+    masks = result["masks"]
+
+    h, w = masks.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[..., 0] = (masks & 0xFF).astype(np.uint8)
+    rgb[..., 1] = ((masks >> 8) & 0xFF).astype(np.uint8)
+
+    pil_img = Image.fromarray(rgb)
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format="PNG")
+    b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    return jsonify({
+        "image_index": image_index,
+        "width": int(w),
+        "height": int(h),
+        "num_cells": int(result["num_cells"]),
+        "mask_base64": f"data:image/png;base64,{b64}",
     })
 
 

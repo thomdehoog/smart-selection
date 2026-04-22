@@ -496,6 +496,93 @@ class TestDatasetState:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 7. /api/segment_preview endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSegmentPreview:
+    """Tests for the single-tile segmentation preview endpoint."""
+
+    def _client_with_dataset(self, monkeypatch, num_images=2):
+        """Build a Flask test client with a dataset loaded and segmentation stubbed."""
+        from models.dataset import create_dataset, clear_dataset
+        import app as app_module
+
+        clear_dataset()
+        state = create_dataset("preview-test")
+        state.images = [
+            np.random.uniform(0, 100, (32, 48, 3)).astype(np.float32)
+            for _ in range(num_images)
+        ]
+
+        def fake_segment_cells(image, gpu=True):
+            h, w = image.shape[:2]
+            masks = np.zeros((h, w), dtype=np.int32)
+            # Two labelled blobs with globally-unique IDs so R/G encoding exercises both bytes
+            masks[4:10, 4:10] = 1
+            masks[12:20, 20:30] = 257  # forces G byte to 1, R byte to 1
+            return {"masks": masks, "num_cells": 2, "objects": []}
+
+        monkeypatch.setattr(app_module, "segment_cells", fake_segment_cells)
+        client = app_module.app.test_client()
+        return client, state
+
+    def test_segment_preview_happy_path(self, monkeypatch):
+        """Valid image_index returns mask PNG with correct shape and cell count."""
+        import base64 as _b64
+        import io as _io
+        from PIL import Image as _Image
+
+        client, state = self._client_with_dataset(monkeypatch)
+        resp = client.post("/api/segment_preview", json={"image_index": 0})
+        assert resp.status_code == 200
+
+        payload = resp.get_json()
+        assert payload["image_index"] == 0
+        assert payload["width"] == 48
+        assert payload["height"] == 32
+        assert payload["num_cells"] == 2
+        assert payload["mask_base64"].startswith("data:image/png;base64,")
+
+        # Decode PNG and verify the R/G id encoding round-trips
+        raw = payload["mask_base64"].split(",", 1)[1]
+        png_bytes = _b64.b64decode(raw)
+        decoded = np.array(_Image.open(_io.BytesIO(png_bytes)))
+        assert decoded.shape == (32, 48, 3)
+        # Pixel inside blob 1: R=1, G=0
+        assert decoded[5, 5, 0] == 1 and decoded[5, 5, 1] == 0
+        # Pixel inside blob 257: R=1, G=1
+        assert decoded[15, 25, 0] == 1 and decoded[15, 25, 1] == 1
+
+        # Endpoint must not mutate persistent state
+        assert state.cell_masks == []
+        assert state.objects == []
+
+    def test_segment_preview_no_dataset(self, monkeypatch):
+        """Calling segment_preview before loading a dataset returns 400."""
+        from models.dataset import clear_dataset
+        import app as app_module
+
+        clear_dataset()
+        client = app_module.app.test_client()
+        resp = client.post("/api/segment_preview", json={"image_index": 0})
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
+    def test_segment_preview_index_out_of_range(self, monkeypatch):
+        """image_index beyond the loaded images returns 400."""
+        client, _ = self._client_with_dataset(monkeypatch, num_images=2)
+        resp = client.post("/api/segment_preview", json={"image_index": 5})
+        assert resp.status_code == 400
+        assert "out of range" in resp.get_json()["error"].lower()
+
+    def test_segment_preview_missing_index(self, monkeypatch):
+        """Request without image_index returns 400."""
+        client, _ = self._client_with_dataset(monkeypatch)
+        resp = client.post("/api/segment_preview", json={})
+        assert resp.status_code == 400
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Run
 # ═══════════════════════════════════════════════════════════════════════════
 
