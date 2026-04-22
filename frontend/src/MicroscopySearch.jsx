@@ -1,4 +1,7 @@
-import { Component, memo, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Component, memo, useCallback, useEffect, useLayoutEffect,
+  useMemo, useRef, useState,
+} from "react";
 
 const API = "http://localhost:5050/api";
 
@@ -111,7 +114,16 @@ export function useAppState() {
     results: [], dissimilar: [],
     alpha: 0.4, threshold: 0.0,
   });
-  const set = useCallback((p) => setS((prev) => ({ ...prev, ...p })), []);
+  // Accepts either a partial patch (`set({ foo: 1 })`) or a reducer
+  // (`set(prev => ({ foo: prev.foo + 1 }))`). Reducers are essential for
+  // updates that depend on current state — multiple rapid clicks otherwise
+  // see the same stale closure and the later write clobbers the earlier one.
+  const set = useCallback((p) => {
+    setS((prev) => {
+      const patch = typeof p === "function" ? p(prev) : p;
+      return { ...prev, ...patch };
+    });
+  }, []);
   const toggle = useCallback((id) => {
     setS((prev) => {
       const next = new Set(prev.selected);
@@ -269,44 +281,35 @@ function StepDataset({ s, set }) {
 
 /* ─── Step 2: Segmentation ──────────────────────────────────────────────── */
 
-function StepSegmentation({ s, set }) {
-  const canvasRef = useRef(null);
-  const rawImgRef = useRef(null);
-  const colorCvRef = useRef(null);       // Offscreen RGBA canvas with colored mask
-  const [rawImg, setRawImg] = useState(null);
-  const [loadingPreview, setLoadingPreview] = useState(false);
-
-  // Load the raw image for the currently-selected preview tile
+// Loads `src` into an HTMLImageElement and returns it once decoded.
+// Cancels any in-flight load when src changes or the component unmounts.
+function useDecodedImage(src) {
+  const [img, setImg] = useState(null);
   useEffect(() => {
+    if (!src) { setImg(null); return; }
     let cancelled = false;
-    setRawImg(null);
-    api.image(s.previewImgIdx).then(d => {
-      if (!cancelled) setRawImg(d);
-    }).catch(e => {
-      if (!cancelled) set({ error: e.message });
-    });
+    setImg(null);
+    const el = new window.Image();
+    el.onload = () => { if (!cancelled) setImg(el); };
+    el.onerror = () => { if (!cancelled) setImg(null); };
+    el.src = src;
     return () => { cancelled = true; };
-  }, [s.previewImgIdx, set]);
+  }, [src]);
+  return img;
+}
 
-  // When raw image arrives, draw it on the canvas.
+// Paints the id-encoded mask PNG into an offscreen RGBA canvas colored by
+// idToRGB. Returns null until the mask image has decoded. Memoization is
+// implicit: state only updates when the input changes, and the decode
+// happens once per mask.
+function useColoredMask(maskPayload) {
+  const [canvas, setCanvas] = useState(null);
   useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || !rawImg) return;
-    const img = new window.Image();
-    img.onload = () => {
-      rawImgRef.current = img;
-      cv.width = img.width; cv.height = img.height;
-      redraw();
-    };
-    img.src = rawImg.thumbnail_base64;
-  }, [rawImg]);
-
-  // Build the colored-mask offscreen canvas once per mask change
-  useEffect(() => {
-    colorCvRef.current = null;
-    if (!s.previewMaskData) { redraw(); return; }
+    if (!maskPayload) { setCanvas(null); return; }
+    let cancelled = false;
     const mImg = new window.Image();
     mImg.onload = () => {
+      if (cancelled) return;
       const w = mImg.width, h = mImg.height;
       const mCv = document.createElement("canvas");
       mCv.width = w; mCv.height = h;
@@ -322,39 +325,60 @@ function StepSegmentation({ s, set }) {
       const colorCache = new Map();
 
       for (let p = 0; p < w * h; p++) {
-        const idx = p * 4;
-        const id = mData[idx] + mData[idx + 1] * 256;
+        const i = p * 4;
+        const id = mData[i] + mData[i + 1] * 256;
         if (id === 0) continue;
         let rgb = colorCache.get(id);
         if (!rgb) { rgb = idToRGB(id); colorCache.set(id, rgb); }
-        outData[idx] = rgb[0];
-        outData[idx + 1] = rgb[1];
-        outData[idx + 2] = rgb[2];
-        outData[idx + 3] = 255;
+        outData[i] = rgb[0];
+        outData[i + 1] = rgb[1];
+        outData[i + 2] = rgb[2];
+        outData[i + 3] = 255;
       }
       outCtx.putImageData(outImg, 0, 0);
-      colorCvRef.current = out;
-      redraw();
+      setCanvas(out);
     };
-    mImg.src = s.previewMaskData.mask_base64;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s.previewMaskData]);
+    mImg.src = maskPayload.mask_base64;
+    return () => { cancelled = true; };
+  }, [maskPayload]);
+  return canvas;
+}
 
-  // Redraw on opacity change (no recolor — just globalAlpha)
-  useEffect(() => { redraw(); /* eslint-disable-next-line */ }, [s.maskAlpha]);
+function StepSegmentation({ s, set }) {
+  const canvasRef = useRef(null);
+  const [tile, setTile] = useState(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
 
-  const redraw = () => {
+  // Fetch the tile payload for the current preview index.
+  useEffect(() => {
+    let cancelled = false;
+    setTile(null);
+    api.image(s.previewImgIdx)
+      .then(d => { if (!cancelled) setTile(d); })
+      .catch(e => { if (!cancelled) set({ error: e.message }); });
+    return () => { cancelled = true; };
+  }, [s.previewImgIdx, set]);
+
+  const rawImgEl = useDecodedImage(tile && tile.thumbnail_base64);
+  const colorCv = useColoredMask(s.previewMaskData);
+
+  // Single draw step. Depends on the decoded image, the colored mask,
+  // and the opacity — nothing else. useLayoutEffect so the user never
+  // sees a flash of the wrong alpha between paints.
+  useLayoutEffect(() => {
     const cv = canvasRef.current;
-    if (!cv || !rawImgRef.current) return;
+    if (!cv || !rawImgEl) return;
+    cv.width = rawImgEl.width;
+    cv.height = rawImgEl.height;
     const ctx = cv.getContext("2d");
     ctx.globalAlpha = 1;
-    ctx.drawImage(rawImgRef.current, 0, 0, cv.width, cv.height);
-    if (colorCvRef.current) {
+    ctx.drawImage(rawImgEl, 0, 0);
+    if (colorCv) {
       ctx.globalAlpha = s.maskAlpha;
-      ctx.drawImage(colorCvRef.current, 0, 0, cv.width, cv.height);
+      ctx.drawImage(colorCv, 0, 0, cv.width, cv.height);
       ctx.globalAlpha = 1;
     }
-  };
+  }, [rawImgEl, colorCv, s.maskAlpha]);
 
   const runPreview = async () => {
     setLoadingPreview(true); set({ error: null });
@@ -413,7 +437,7 @@ function StepSegmentation({ s, set }) {
         <div style={S.previewLayout}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={S.canvasFrame}>
-              {rawImg ? (
+              {rawImgEl ? (
                 <canvas ref={canvasRef} style={{ width: "100%", display: "block" }} />
               ) : (
                 <div style={S.canvasPlaceholder}>Loading tile…</div>
@@ -472,13 +496,14 @@ function SelectionGallery({ s, set }) {
     api.crops(ids).then(d => setThumbs(d.crops || [])).catch(() => {});
   }, [s.selected]);
 
-  const remove = (id) => {
-    const ns = new Set(s.selected); ns.delete(id);
-    set({
-      selected: ns,
-      positive: s.positive.filter(x => x !== id),
-    });
-  };
+  const remove = (id) => set(prev => {
+    const selected = new Set(prev.selected);
+    selected.delete(id);
+    return {
+      selected,
+      positive: prev.positive.filter(x => x !== id),
+    };
+  });
 
   const count = s.selected.size;
   return (
@@ -554,69 +579,83 @@ function computeMaskBboxes(data, w, h) {
   return bboxes;
 }
 
-function SimilarityPanel({ s, set, toggle }) {
-  const canvasRef = useRef(null);
-  // Cached offscreen state — invalidated when the tile changes.
-  const maskRef = useRef(null);      // { w, h, data, bboxes }
-  const rawImgRef = useRef(null);    // decoded HTMLImageElement for the raw tile
-  const brightCvRef = useRef(null);  // offscreen canvas of the raw tile at display size
-  const [hovered, setHovered] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const loadSeqRef = useRef(0);      // increments per tile load to discard stale responses
-  const searchSeqRef = useRef(0);    // same pattern for search/recompute
-
+// Fetches the tile's image and objects payloads whenever the selected
+// tile changes (and the pipeline has finished). Cancellation happens via
+// the effect cleanup, so two quick tile clicks can't resolve out of
+// order — the earlier cleanup runs before the later response lands.
+function useTileData(imgIdx, enabled, set) {
   useEffect(() => {
-    if (!s.imageData) return;
-    const seq = ++loadSeqRef.current;
-    maskRef.current = null;
-    rawImgRef.current = null;
-    brightCvRef.current = null;
+    if (!enabled) return;
+    let cancelled = false;
+    Promise.all([api.image(imgIdx), api.objects(imgIdx)])
+      .then(([img, obj]) => {
+        if (!cancelled) set({ imageData: img, objects: obj.objects || [] });
+      })
+      .catch(e => { if (!cancelled) set({ error: e.message }); });
+    return () => { cancelled = true; };
+  }, [imgIdx, enabled, set]);
+}
 
-    const rawImg = new window.Image();
-    rawImg.onload = () => {
-      if (seq !== loadSeqRef.current) return;
-      rawImgRef.current = rawImg;
-      const bc = document.createElement("canvas");
-      bc.width = rawImg.width; bc.height = rawImg.height;
-      bc.getContext("2d").drawImage(rawImg, 0, 0);
-      brightCvRef.current = bc;
-      drawSelection();
-    };
-    rawImg.src = s.imageData.thumbnail_base64;
-
-    api.mask(s.imgIdx).then(d => {
-      if (seq !== loadSeqRef.current) return;
+// Fetches and decodes the mask PNG for a tile, returns { w, h, data,
+// bboxes } once ready. Cancels on unmount / dep change.
+function useTileMask(imgIdx, enabled, onError) {
+  const [mask, setMask] = useState(null);
+  useEffect(() => {
+    if (!enabled) { setMask(null); return; }
+    let cancelled = false;
+    setMask(null);
+    api.mask(imgIdx).then(d => {
+      if (cancelled) return;
       const mImg = new window.Image();
       mImg.onload = () => {
-        if (seq !== loadSeqRef.current) return;
+        if (cancelled) return;
         const w = mImg.width, h = mImg.height;
         const cv = document.createElement("canvas");
         cv.width = w; cv.height = h;
         const ctx = cv.getContext("2d");
         ctx.drawImage(mImg, 0, 0);
         const data = ctx.getImageData(0, 0, w, h).data;
-        maskRef.current = { w, h, data, bboxes: computeMaskBboxes(data, w, h) };
-        drawSelection();
+        setMask({ w, h, data, bboxes: computeMaskBboxes(data, w, h) });
       };
       mImg.src = d.mask_base64;
-    }).catch(e => set({ error: e.message }));
-    // drawSelection intentionally not in deps (reads refs each call).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s.imageData, s.imgIdx, set]);
+    }).catch(e => { if (!cancelled) onError(e); });
+    return () => { cancelled = true; };
+  }, [imgIdx, enabled, onError]);
+  return mask;
+}
 
-  // Redraw on selection / hover change. Refs already cached; no decoding.
-  useEffect(() => { drawSelection(); /* eslint-disable-next-line */ }, [s.selected, hovered]);
+function SimilarityPanel({ s, set, toggle }) {
+  const canvasRef = useRef(null);
+  const [hovered, setHovered] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const searchSeqRef = useRef(0);
 
-  const drawSelection = () => {
+  const onMaskError = useCallback(e => set({ error: e.message }), [set]);
+  useTileData(s.imgIdx, s.pipelineStatus === "done", set);
+  const rawImgEl = useDecodedImage(s.imageData && s.imageData.thumbnail_base64);
+  const mask = useTileMask(s.imgIdx, !!s.imageData, onMaskError);
+
+  // brightCv (raw tile on an offscreen canvas, used for the `source-in`
+  // clipping composite) depends only on the decoded image.
+  const brightCv = useMemo(() => {
+    if (!rawImgEl) return null;
+    const cv = document.createElement("canvas");
+    cv.width = rawImgEl.width; cv.height = rawImgEl.height;
+    cv.getContext("2d").drawImage(rawImgEl, 0, 0);
+    return cv;
+  }, [rawImgEl]);
+
+  // One draw effect. Its dependencies are exactly the inputs it reads —
+  // no refs, no eslint disables. `selected` is a Set, so React's
+  // reference-equality check catches every toggle (each toggle produces
+  // a new Set instance).
+  useLayoutEffect(() => {
     const cv = canvasRef.current;
-    const raw = rawImgRef.current;
-    const mask = maskRef.current;
-    const brightCv = brightCvRef.current;
-    if (!cv || !raw) return;
-
-    cv.width = raw.width; cv.height = raw.height;
+    if (!cv || !rawImgEl) return;
+    cv.width = rawImgEl.width;
+    cv.height = rawImgEl.height;
     const ctx = cv.getContext("2d");
-    ctx.drawImage(raw, 0, 0);
+    ctx.drawImage(rawImgEl, 0, 0);
     ctx.fillStyle = "rgba(0,0,0,0.4)";
     ctx.fillRect(0, 0, cv.width, cv.height);
     if (!mask || !brightCv) return;
@@ -627,7 +666,8 @@ function SimilarityPanel({ s, set, toggle }) {
 
     const { w, h, data, bboxes } = mask;
     const sx = cv.width / w, sy = cv.height / h;
-    const cw = Math.max(Math.ceil(sx), 1), chp = Math.max(Math.ceil(sy), 1);
+    const cellW = Math.max(Math.ceil(sx), 1);
+    const cellH = Math.max(Math.ceil(sy), 1);
 
     const clipCv = document.createElement("canvas");
     clipCv.width = cv.width; clipCv.height = cv.height;
@@ -644,18 +684,17 @@ function SimilarityPanel({ s, set, toggle }) {
         for (let mx = x1; mx <= x2; mx++) {
           const idx = row + mx * 4;
           if ((data[idx] + data[idx + 1] * 256) !== id) continue;
-          clipCtx.fillRect(Math.floor(mx * sx), Math.floor(my * sy), cw, chp);
+          clipCtx.fillRect(Math.floor(mx * sx), Math.floor(my * sy), cellW, cellH);
         }
       }
     }
     clipCtx.globalCompositeOperation = "source-in";
     clipCtx.drawImage(brightCv, 0, 0);
     ctx.drawImage(clipCv, 0, 0);
-  };
+  }, [rawImgEl, mask, brightCv, s.selected, hovered]);
 
   const hitTest = (e) => {
     const cv = canvasRef.current;
-    const mask = maskRef.current;
     if (!cv || !mask) return null;
     const r = cv.getBoundingClientRect();
     const mx = Math.floor(((e.clientX - r.left) / r.width) * mask.w);
@@ -666,17 +705,10 @@ function SimilarityPanel({ s, set, toggle }) {
     return id > 0 ? id : null;
   };
 
-  const switchTile = async (i) => {
-    if (i === s.imgIdx) return;
-    const seq = ++loadSeqRef.current;
-    try {
-      const [img, obj] = await Promise.all([api.image(i), api.objects(i)]);
-      if (seq !== loadSeqRef.current) return;
-      set({ imageData: img, objects: obj.objects || [], imgIdx: i });
-    } catch (e) {
-      if (seq === loadSeqRef.current) set({ error: e.message });
-    }
-  };
+  // Tile data is fetched via useTileData above — this just updates the
+  // selected index and lets the effect cascade handle the rest. That
+  // keeps cancellation semantics in one place.
+  const switchTile = (i) => { if (i !== s.imgIdx) set({ imgIdx: i }); };
 
   const search = async () => {
     if (s.selected.size === 0) return;
@@ -697,22 +729,21 @@ function SimilarityPanel({ s, set, toggle }) {
     }
   };
 
-  const accept = useCallback((id) => {
-    set({
-      selected: new Set(s.selected).add(id),
-      positive: [...s.positive, id],
-      results: s.results.filter(r => r.object_id !== id),
-      dissimilar: s.dissimilar.filter(r => r.object_id !== id),
-    });
-  }, [s.selected, s.positive, s.results, s.dissimilar, set]);
+  // Reducer form so rapid clicks compose correctly. With the patch form,
+  // two clicks before the next render both read stale s.positive / s.results
+  // and the second write silently discards the first.
+  const accept = useCallback((id) => set(prev => ({
+    selected: new Set(prev.selected).add(id),
+    positive: [...prev.positive, id],
+    results: prev.results.filter(r => r.object_id !== id),
+    dissimilar: prev.dissimilar.filter(r => r.object_id !== id),
+  })), [set]);
 
-  const reject = useCallback((id) => {
-    set({
-      negative: [...s.negative, id],
-      results: s.results.filter(r => r.object_id !== id),
-      dissimilar: s.dissimilar.filter(r => r.object_id !== id),
-    });
-  }, [s.negative, s.results, s.dissimilar, set]);
+  const reject = useCallback((id) => set(prev => ({
+    negative: [...prev.negative, id],
+    results: prev.results.filter(r => r.object_id !== id),
+    dissimilar: prev.dissimilar.filter(r => r.object_id !== id),
+  })), [set]);
 
   const visible = s.results.filter(r => r.similarity_score >= s.threshold);
   const COLS = 5, MAX_ROWS = 4, LIMIT = COLS * MAX_ROWS;
@@ -880,7 +911,7 @@ function StepSelection({ s, set, toggle }) {
       <SectionBar title="Cell Selection" subtitle={subtitle}
         actions={
           <>
-            <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>
+            <button style={S.btnSecondary} onClick={() => set({ step: 2, error: null })}>
               Back to Segmentation
             </button>
             {failed && (
@@ -931,13 +962,29 @@ export function scoreColor(v) {
 
 const POLL_INTERVAL_MS = 1500;
 
-// Polls /api/status whenever pipelineStatus === "running".
-// Lives at App scope so it survives navigating between steps.
+// Pipeline lifecycle, lifted to App scope so it survives step navigation.
+//
+// - "starting" → POSTs /segment_and_embed, then flips to "running".
+// - "running" → polls /status on a recursive setTimeout (so slow responses
+//   don't stack requests) until the backend reports "complete" or "error".
+// - "complete" → clears the poll *before* fetching the first tile's image
+//   + objects, so another tick can't race into a duplicate fetch.
+//
+// Crop options are read from a ref rather than deps, so the effect reacts
+// only to pipelineStatus transitions — not to every unrelated toggle.
 function usePipelinePolling(s, set) {
+  const optsRef = useRef(null);
+  optsRef.current = {
+    cropMode: s.cropMode,
+    sizeInvariant: s.sizeInvariant,
+    rotationInvariant: s.rotationInvariant,
+  };
+
   useEffect(() => {
     if (s.pipelineStatus === "starting") {
       let cancelled = false;
-      api.process(s.cropMode, s.sizeInvariant, s.rotationInvariant)
+      const { cropMode, sizeInvariant, rotationInvariant } = optsRef.current;
+      api.process(cropMode, sizeInvariant, rotationInvariant)
         .then(() => { if (!cancelled) set({ pipelineStatus: "running" }); })
         .catch(e => { if (!cancelled) set({ pipelineStatus: "error", error: e.message }); });
       return () => { cancelled = true; };
@@ -945,33 +992,36 @@ function usePipelinePolling(s, set) {
     if (s.pipelineStatus !== "running") return;
 
     let cancelled = false;
+    let timer = null;
+
     const tick = async () => {
       try {
         const st = await api.status();
         if (cancelled) return;
         set({ progress: st.progress || 0, msg: st.message || "" });
+
         if (st.status === "complete") {
-          const [img, obj] = await Promise.all([api.image(0), api.objects(0)]);
-          if (!cancelled) {
-            set({
-              pipelineStatus: "done",
-              imageData: img,
-              objects: obj.objects || [],
-              imgIdx: 0,
-            });
-          }
-        } else if (st.status === "error") {
+          cancelled = true;
+          // Flip to "done" — SimilarityPanel's useTileData hook will
+          // fetch the first tile's image + objects on its own.
+          set({ pipelineStatus: "done", imgIdx: 0 });
+          return;
+        }
+        if (st.status === "error") {
+          cancelled = true;
           set({ pipelineStatus: "error", error: st.error || "Pipeline failed." });
+          return;
         }
       } catch (e) {
         if (!cancelled) set({ pipelineStatus: "error", error: e.message });
+        return;
       }
+      if (!cancelled) timer = setTimeout(tick, POLL_INTERVAL_MS);
     };
 
     tick();
-    const id = setInterval(tick, POLL_INTERVAL_MS);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [s.pipelineStatus, s.cropMode, s.sizeInvariant, s.rotationInvariant, set]);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [s.pipelineStatus, set]);
 }
 
 class ErrorBoundary extends Component {
@@ -1031,7 +1081,7 @@ export default function App() {
                 return (
                   <button key={idx}
                     type="button"
-                    onClick={() => set({ step: idx })}
+                    onClick={() => set({ step: idx, error: null })}
                     disabled={!reachable}
                     aria-current={active ? "step" : undefined}
                     style={{

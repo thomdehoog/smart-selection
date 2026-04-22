@@ -148,15 +148,22 @@ def segment_preview():
 
     data = request.json or {}
     image_index = data.get("image_index")
-    if not isinstance(image_index, int):
+    # Note: isinstance(True, int) is True in Python, so we reject bools explicitly
+    # — {"image_index": true} shouldn't silently become tile 1.
+    if not isinstance(image_index, int) or isinstance(image_index, bool):
         return jsonify({"error": "image_index (int) is required."}), 400
     if image_index < 0 or image_index >= state.num_images():
         return jsonify({"error": f"image_index out of range (0..{state.num_images() - 1})."}), 400
 
     image = state.images[image_index]
-    result = segment_cells(image)
-    masks = result["masks"]
+    try:
+        result = segment_cells(image)
+    except Exception as e:
+        # Surface the error as JSON so the frontend can show a real message
+        # instead of the default 500 HTML page.
+        return jsonify({"error": f"Segmentation failed: {e}"}), 500
 
+    masks = result["masks"]
     h, w = masks.shape
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
     rgb[..., 0] = (masks & 0xFF).astype(np.uint8)

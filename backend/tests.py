@@ -581,6 +581,34 @@ class TestSegmentPreview:
         resp = client.post("/api/segment_preview", json={})
         assert resp.status_code == 400
 
+    def test_segment_preview_rejects_bool_index(self, monkeypatch):
+        """isinstance(True, int) is True in Python — make sure we reject bools."""
+        client, _ = self._client_with_dataset(monkeypatch)
+        resp = client.post("/api/segment_preview", json={"image_index": True})
+        assert resp.status_code == 400
+        assert "required" in resp.get_json()["error"].lower()
+
+    def test_segment_preview_segmentation_failure_returns_json(self, monkeypatch):
+        """If segment_cells raises, the endpoint returns a 500 JSON body
+        instead of the default Flask HTML error page."""
+        from models.dataset import create_dataset, clear_dataset
+        import app as app_module
+
+        clear_dataset()
+        state = create_dataset("preview-test")
+        state.images = [np.zeros((16, 16, 3), dtype=np.float32)]
+
+        def boom(image, gpu=True):
+            raise RuntimeError("cellpose exploded")
+        monkeypatch.setattr(app_module, "segment_cells", boom)
+        client = app_module.app.test_client()
+
+        resp = client.post("/api/segment_preview", json={"image_index": 0})
+        assert resp.status_code == 500
+        payload = resp.get_json()
+        assert payload is not None, "endpoint should always return JSON"
+        assert "cellpose exploded" in payload["error"]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Run

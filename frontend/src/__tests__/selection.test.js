@@ -40,6 +40,40 @@ describe("selection toggle", () => {
   });
 });
 
+describe("reducer form of set()", () => {
+  // Regression test for the stale-closure bug: two sequential patches that
+  // each depend on the current state must compose, not clobber each other.
+  it("two rapid patch-form updates on the same state snapshot clobber each other", () => {
+    const { result } = renderHook(() => useAppState());
+    act(() => result.current.set({ positive: [1, 2, 3] }));
+    const snapshot = result.current.s;
+    // Simulate two rapid clicks reading the same `snapshot`:
+    act(() => {
+      result.current.set({ positive: snapshot.positive.filter(x => x !== 1) });
+      result.current.set({ positive: snapshot.positive.filter(x => x !== 2) });
+    });
+    // Second write wins, first is lost → 1 is back
+    expect(result.current.s.positive).toEqual([1, 3]);
+  });
+
+  it("reducer form composes rapid updates correctly", () => {
+    const { result } = renderHook(() => useAppState());
+    act(() => result.current.set({ positive: [1, 2, 3] }));
+    act(() => {
+      result.current.set(prev => ({ positive: prev.positive.filter(x => x !== 1) }));
+      result.current.set(prev => ({ positive: prev.positive.filter(x => x !== 2) }));
+    });
+    expect(result.current.s.positive).toEqual([3]);
+  });
+
+  it("reducer return merges with previous state", () => {
+    const { result } = renderHook(() => useAppState());
+    act(() => result.current.set(prev => ({ progress: 0.5 })));
+    expect(result.current.s.progress).toBe(0.5);
+    expect(result.current.s.step).toBe(1);   // unchanged, still merged
+  });
+});
+
 describe("accept / reject transitions", () => {
   it("accept moves an id from results to positive", () => {
     let positive = [1, 2, 3];
