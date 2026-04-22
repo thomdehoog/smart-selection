@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useRef, useState } from "react";
+import { Component, memo, useCallback, useEffect, useRef, useState } from "react";
 
 const API = "http://localhost:5050/api";
 
@@ -381,7 +381,7 @@ function StepSegmentation({ s, set }) {
       subtitle="Preview the segmentation on a single tile before running the full pipeline."
       actions={
         <button style={S.btnPrimary} onClick={continueToSelection}
-          disabled={s.pipelineStatus === "running"}>
+          disabled={s.pipelineStatus === "starting" || s.pipelineStatus === "running"}>
           Continue → Cell selection
         </button>
       }>
@@ -443,7 +443,9 @@ function StepSegmentation({ s, set }) {
 
             <button style={{ ...S.btnSecondary, marginTop: 12, width: "100%" }}
               onClick={runPreview}
-              disabled={loadingPreview || s.pipelineStatus === "running"}>
+              disabled={loadingPreview
+                || s.pipelineStatus === "starting"
+                || s.pipelineStatus === "running"}>
               {loadingPreview ? "Running…" : "Run preview"}
             </button>
 
@@ -509,7 +511,7 @@ function SelectionGallery({ s, set }) {
   );
 }
 
-function ResultCard({ r, onAccept, onReject }) {
+const ResultCard = memo(function ResultCard({ r, onAccept, onReject }) {
   return (
     <div style={S.resultCard}>
       <div style={S.thumbContainer}>
@@ -527,30 +529,57 @@ function ResultCard({ r, onAccept, onReject }) {
       </div>
     </div>
   );
+});
+
+// Scan the mask pixel buffer once to compute the bounding box of each id.
+// Lets drawSelection iterate only inside highlighted cells' boxes instead
+// of every pixel in the image.
+function computeMaskBboxes(data, w, h) {
+  const bboxes = new Map();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const id = data[i] + data[i + 1] * 256;
+      if (id === 0) continue;
+      const b = bboxes.get(id);
+      if (!b) bboxes.set(id, [x, y, x, y]);
+      else {
+        if (x < b[0]) b[0] = x;
+        if (y < b[1]) b[1] = y;
+        if (x > b[2]) b[2] = x;
+        if (y > b[3]) b[3] = y;
+      }
+    }
+  }
+  return bboxes;
 }
 
 function SimilarityPanel({ s, set, toggle }) {
   const canvasRef = useRef(null);
   // Cached offscreen state — invalidated when the tile changes.
-  const maskPixelsRef = useRef(null);   // Uint8ClampedArray of the mask PNG (id-encoded)
-  const rawImgRef = useRef(null);       // decoded HTMLImageElement for the raw tile
+  const maskRef = useRef(null);      // { w, h, data, bboxes }
+  const rawImgRef = useRef(null);    // decoded HTMLImageElement for the raw tile
+  const brightCvRef = useRef(null);  // offscreen canvas of the raw tile at display size
   const [hovered, setHovered] = useState(null);
   const [busy, setBusy] = useState(false);
-  const loadSeqRef = useRef(0);         // increments on each tile load to discard stale responses
+  const loadSeqRef = useRef(0);      // increments per tile load to discard stale responses
+  const searchSeqRef = useRef(0);    // same pattern for search/recompute
 
-  // Load raw image + mask as one transaction per tile change. Stale
-  // responses (user clicked away before they resolved) are ignored via
-  // the sequence counter.
   useEffect(() => {
     if (!s.imageData) return;
     const seq = ++loadSeqRef.current;
-    maskPixelsRef.current = null;
+    maskRef.current = null;
     rawImgRef.current = null;
+    brightCvRef.current = null;
 
     const rawImg = new window.Image();
     rawImg.onload = () => {
       if (seq !== loadSeqRef.current) return;
       rawImgRef.current = rawImg;
+      const bc = document.createElement("canvas");
+      bc.width = rawImg.width; bc.height = rawImg.height;
+      bc.getContext("2d").drawImage(rawImg, 0, 0);
+      brightCvRef.current = bc;
       drawSelection();
     };
     rawImg.src = s.imageData.thumbnail_base64;
@@ -565,25 +594,24 @@ function SimilarityPanel({ s, set, toggle }) {
         cv.width = w; cv.height = h;
         const ctx = cv.getContext("2d");
         ctx.drawImage(mImg, 0, 0);
-        maskPixelsRef.current = {
-          w, h, data: ctx.getImageData(0, 0, w, h).data,
-        };
+        const data = ctx.getImageData(0, 0, w, h).data;
+        maskRef.current = { w, h, data, bboxes: computeMaskBboxes(data, w, h) };
         drawSelection();
       };
       mImg.src = d.mask_base64;
     }).catch(e => set({ error: e.message }));
-    // drawSelection intentionally not in deps (reads refs on each call).
+    // drawSelection intentionally not in deps (reads refs each call).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.imageData, s.imgIdx, set]);
 
-  // Redraw whenever the selection or hover changes, using the cached raw
-  // image + mask buffer. No PNG decoding, no extra fetches.
+  // Redraw on selection / hover change. Refs already cached; no decoding.
   useEffect(() => { drawSelection(); /* eslint-disable-next-line */ }, [s.selected, hovered]);
 
   const drawSelection = () => {
     const cv = canvasRef.current;
     const raw = rawImgRef.current;
-    const mask = maskPixelsRef.current;
+    const mask = maskRef.current;
+    const brightCv = brightCvRef.current;
     if (!cv || !raw) return;
 
     cv.width = raw.width; cv.height = raw.height;
@@ -591,32 +619,33 @@ function SimilarityPanel({ s, set, toggle }) {
     ctx.drawImage(raw, 0, 0);
     ctx.fillStyle = "rgba(0,0,0,0.4)";
     ctx.fillRect(0, 0, cv.width, cv.height);
-    if (!mask) return;
+    if (!mask || !brightCv) return;
 
     const highlight = new Set(s.selected);
     if (hovered && !highlight.has(hovered)) highlight.add(hovered);
     if (highlight.size === 0) return;
 
-    const { w, h, data } = mask;
+    const { w, h, data, bboxes } = mask;
     const sx = cv.width / w, sy = cv.height / h;
-    const cw = Math.max(Math.ceil(sx), 1), ch = Math.max(Math.ceil(sy), 1);
-
-    const brightCv = document.createElement("canvas");
-    brightCv.width = cv.width; brightCv.height = cv.height;
-    brightCv.getContext("2d").drawImage(raw, 0, 0);
+    const cw = Math.max(Math.ceil(sx), 1), chp = Math.max(Math.ceil(sy), 1);
 
     const clipCv = document.createElement("canvas");
     clipCv.width = cv.width; clipCv.height = cv.height;
     const clipCtx = clipCv.getContext("2d");
 
-    for (let my = 0; my < h; my++) {
-      for (let mx = 0; mx < w; mx++) {
-        const idx = (my * w + mx) * 4;
-        const id = data[idx] + data[idx + 1] * 256;
-        if (id === 0 || !highlight.has(id)) continue;
-        clipCtx.fillStyle = hovered === id && !s.selected.has(id)
-          ? "rgba(200,220,255,0.7)" : "white";
-        clipCtx.fillRect(Math.floor(mx * sx), Math.floor(my * sy), cw, ch);
+    for (const id of highlight) {
+      const b = bboxes.get(id);
+      if (!b) continue;
+      clipCtx.fillStyle = hovered === id && !s.selected.has(id)
+        ? "rgba(200,220,255,0.7)" : "white";
+      const [x1, y1, x2, y2] = b;
+      for (let my = y1; my <= y2; my++) {
+        const row = my * w * 4;
+        for (let mx = x1; mx <= x2; mx++) {
+          const idx = row + mx * 4;
+          if ((data[idx] + data[idx + 1] * 256) !== id) continue;
+          clipCtx.fillRect(Math.floor(mx * sx), Math.floor(my * sy), cw, chp);
+        }
       }
     }
     clipCtx.globalCompositeOperation = "source-in";
@@ -626,7 +655,7 @@ function SimilarityPanel({ s, set, toggle }) {
 
   const hitTest = (e) => {
     const cv = canvasRef.current;
-    const mask = maskPixelsRef.current;
+    const mask = maskRef.current;
     if (!cv || !mask) return null;
     const r = cv.getBoundingClientRect();
     const mx = Math.floor(((e.clientX - r.left) / r.width) * mask.w);
@@ -651,6 +680,7 @@ function SimilarityPanel({ s, set, toggle }) {
 
   const search = async () => {
     if (s.selected.size === 0) return;
+    const seq = ++searchSeqRef.current;
     setBusy(true);
     const pos = [...s.selected];
     try {
@@ -658,29 +688,31 @@ function SimilarityPanel({ s, set, toggle }) {
         api.search(pos, s.negative, 50, s.alpha),
         api.searchDissimilar(pos, 28),
       ]);
+      if (seq !== searchSeqRef.current) return;
       set({ positive: pos, results: sim.results || [], dissimilar: dis.results || [] });
     } catch (e) {
-      set({ error: e.message });
+      if (seq === searchSeqRef.current) set({ error: e.message });
+    } finally {
+      if (seq === searchSeqRef.current) setBusy(false);
     }
-    setBusy(false);
   };
 
-  const accept = (id) => {
-    const ns = new Set(s.selected); ns.add(id);
+  const accept = useCallback((id) => {
     set({
-      selected: ns,
+      selected: new Set(s.selected).add(id),
       positive: [...s.positive, id],
       results: s.results.filter(r => r.object_id !== id),
       dissimilar: s.dissimilar.filter(r => r.object_id !== id),
     });
-  };
-  const reject = (id) => {
+  }, [s.selected, s.positive, s.results, s.dissimilar, set]);
+
+  const reject = useCallback((id) => {
     set({
       negative: [...s.negative, id],
       results: s.results.filter(r => r.object_id !== id),
       dissimilar: s.dissimilar.filter(r => r.object_id !== id),
     });
-  };
+  }, [s.negative, s.results, s.dissimilar, set]);
 
   const visible = s.results.filter(r => r.similarity_score >= s.threshold);
   const COLS = 5, MAX_ROWS = 4, LIMIT = COLS * MAX_ROWS;
@@ -991,22 +1023,26 @@ export default function App() {
         <div style={S.headerWrap}>
           <header style={S.header}>
             <span style={S.logo}>Smart Selection</span>
-            <nav style={{ display: "flex", gap: 2 }}>
+            <nav style={{ display: "flex", gap: 2 }} aria-label="Workflow steps">
               {steps.map((label, i) => {
                 const idx = i + 1;
                 const reachable = canNav(idx);
+                const active = s.step === idx;
                 return (
-                  <span key={idx}
-                    onClick={() => { if (reachable) set({ step: idx }); }}
+                  <button key={idx}
+                    type="button"
+                    onClick={() => set({ step: idx })}
+                    disabled={!reachable}
+                    aria-current={active ? "step" : undefined}
                     style={{
                       ...S.stepPill,
-                      ...(s.step === idx ? S.stepPillActive : {}),
+                      ...(active ? S.stepPillActive : {}),
                       ...(s.step > idx ? S.stepPillDone : {}),
                       cursor: reachable ? "pointer" : "default",
                       opacity: reachable ? 1 : 0.45,
                     }}>
                     {idx}. {label}
-                  </span>
+                  </button>
                 );
               })}
             </nav>
@@ -1045,6 +1081,7 @@ const S = {
   stepPill: {
     padding: "6px 14px", fontSize: 13, color: "#9CA3AF", borderRadius: 6,
     fontWeight: 500, transition: "all 0.15s", userSelect: "none",
+    background: "transparent", border: "none", fontFamily: "inherit",
   },
   stepPillActive: { background: "#EFF6FF", color: "#2563EB", fontWeight: 600 },
   stepPillDone: { color: "#16A34A" },
