@@ -63,7 +63,7 @@ const SEL_MODES = [
 /* ─── Color helpers ─────────────────────────────────────────────────────── */
 // Golden-angle HSL (saturation 0.7, lightness 0.55). Deterministic per object id.
 const GOLDEN_ANGLE = 137.508;
-function idToRGB(id) {
+export function idToRGB(id) {
   const h = (((id * GOLDEN_ANGLE) % 360) + 360) % 360 / 360;
   const s = 0.7, l = 0.55;
   const c = (1 - Math.abs(2 * l - 1)) * s;
@@ -848,7 +848,7 @@ function StepSelection({ s, set, toggle }) {
   );
 }
 
-function scoreColor(v) {
+export function scoreColor(v) {
   if (v > 0.8) return "#16A34A";
   if (v > 0.5) return "#CA8A04";
   return "#DC2626";
