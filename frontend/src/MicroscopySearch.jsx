@@ -114,6 +114,56 @@ export function useAppState() {
   return { s, set, toggle };
 }
 
+/* ─── Shared components ─────────────────────────────────────────────────── */
+
+function SectionBar({ title, subtitle, accent = "#374151", count, actions, children }) {
+  return (
+    <section style={{ ...S.section, borderLeftColor: accent }}>
+      <header style={S.sectionHeader}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
+          <h2 style={{ ...S.sectionTitle, color: accent }}>{title}</h2>
+          {count != null && <span style={S.sectionCount}>{count}</span>}
+        </div>
+        {actions && <div style={S.sectionActions}>{actions}</div>}
+      </header>
+      <div style={S.sectionBody}>
+        {subtitle && <p style={S.muted}>{subtitle}</p>}
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function ToggleGroup({ value, onChange, options, disabled = false }) {
+  return (
+    <div style={S.toggleGroup} role="radiogroup">
+      {options.map(o => {
+        const active = value === o.value;
+        return (
+          <button key={String(o.value)}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(o.value)}
+            style={active ? { ...S.toggleBtn, ...S.toggleBtnActive } : S.toggleBtn}>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FormField({ label, children }) {
+  return (
+    <div>
+      <div style={S.formSectionTitle}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
 /* ─── Step 1: Dataset ───────────────────────────────────────────────────── */
 
 function StepDataset({ s, set }) {
@@ -150,90 +200,62 @@ function StepDataset({ s, set }) {
   const isPreset = s.datasetSource in DATASET_PRESETS;
 
   return (
-    <section style={S.card}>
-      <h2 style={S.h2}>Dataset</h2>
-      <p style={S.muted}>Pick a preset plate or point to a local directory.</p>
-
-      <div style={S.formGroup}>
-        <label style={S.label}>Dataset</label>
-        <select style={S.select} value={s.datasetSource} onChange={e => onSourceChange(e.target.value)}>
-          <option value="bbbc021_week1">BBBC021 Week 1</option>
-          <option value="custom">Custom path…</option>
-        </select>
-      </div>
-
-      <div style={{ ...S.formGroup, marginTop: 16 }}>
-        <label style={S.label}>{isPreset ? "Path (preset)" : "Image directory"}</label>
-        <input
-          style={S.input}
-          value={s.datasetPath}
-          onChange={e => set({ datasetPath: e.target.value })}
-          readOnly={isPreset}
-          placeholder="/path/to/bbbc021_raw/Week1_22123/"
-        />
-      </div>
-
-      <div style={{ display: "flex", gap: 24, marginTop: 20, flexWrap: "wrap" }}>
-        <div style={S.formGroup}>
-          <label style={S.label}>Fields of view</label>
-          <input style={{ ...S.input, width: 100 }} type="number" min={1} max={100}
-            value={s.n} onChange={e => set({ n: +e.target.value || 5 })} />
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Crop mode</label>
-          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-            <label style={S.radioLabel}>
-              <input type="radio" name="cropMode" checked={s.cropMode === "single_cell"}
-                onChange={() => set({ cropMode: "single_cell" })} />
-              Single cell
-            </label>
-            <label style={S.radioLabel}>
-              <input type="radio" name="cropMode" checked={s.cropMode === "neighborhood"}
-                onChange={() => set({ cropMode: "neighborhood" })} />
-              Neighborhood
-            </label>
-          </div>
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Size</label>
-          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-            <label style={S.radioLabel}>
-              <input type="radio" name="sizeMode" checked={s.sizeInvariant}
-                onChange={() => set({ sizeInvariant: true })} />
-              Invariant
-            </label>
-            <label style={S.radioLabel}>
-              <input type="radio" name="sizeMode" checked={!s.sizeInvariant}
-                onChange={() => set({ sizeInvariant: false })} />
-              Aware
-            </label>
-          </div>
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Rotation</label>
-          <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-            <label style={S.radioLabel}>
-              <input type="radio" name="rotMode" checked={s.rotationInvariant}
-                onChange={() => set({ rotationInvariant: true })} />
-              Invariant
-            </label>
-            <label style={S.radioLabel}>
-              <input type="radio" name="rotMode" checked={!s.rotationInvariant}
-                onChange={() => set({ rotationInvariant: false })} />
-              Aware
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 24 }}>
-        <button style={S.btnPrimary} onClick={load} disabled={loading || !s.datasetPath.trim()}>
+    <SectionBar title="Dataset" subtitle="Pick a preset plate or point to a local directory."
+      actions={
+        <button style={S.btnPrimary} onClick={load}
+          disabled={loading || !s.datasetPath.trim()}>
           {loading ? "Loading…" : "Load dataset"}
         </button>
-      </div>
+      }>
+      <div style={S.formStack}>
+        <FormField label="Dataset source">
+          <select style={S.select} value={s.datasetSource}
+            onChange={e => onSourceChange(e.target.value)}>
+            <option value="bbbc021_week1">BBBC021 Week 1</option>
+            <option value="custom">Custom path…</option>
+          </select>
+        </FormField>
 
-      {s.error && <p style={S.errorText}>{s.error}</p>}
-    </section>
+        <FormField label={isPreset ? "Path (preset)" : "Image directory"}>
+          <input style={S.input} value={s.datasetPath}
+            onChange={e => set({ datasetPath: e.target.value })}
+            readOnly={isPreset}
+            placeholder="/path/to/bbbc021_raw/Week1_22123/" />
+        </FormField>
+
+        <FormField label="Fields of view">
+          <input style={{ ...S.input, width: 120 }} type="number" min={1} max={100}
+            value={s.n} onChange={e => set({ n: +e.target.value || 5 })} />
+        </FormField>
+
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+          <FormField label="Crop mode">
+            <ToggleGroup value={s.cropMode} onChange={v => set({ cropMode: v })}
+              options={[
+                { value: "single_cell", label: "Single cell" },
+                { value: "neighborhood", label: "Neighborhood" },
+              ]} />
+          </FormField>
+          <FormField label="Size">
+            <ToggleGroup value={s.sizeInvariant} onChange={v => set({ sizeInvariant: v })}
+              options={[
+                { value: true, label: "Invariant" },
+                { value: false, label: "Aware" },
+              ]} />
+          </FormField>
+          <FormField label="Rotation">
+            <ToggleGroup value={s.rotationInvariant}
+              onChange={v => set({ rotationInvariant: v })}
+              options={[
+                { value: true, label: "Invariant" },
+                { value: false, label: "Aware" },
+              ]} />
+          </FormField>
+        </div>
+
+        {s.error && <p style={S.errorText}>{s.error}</p>}
+      </div>
+    </SectionBar>
   );
 }
 
@@ -367,81 +389,89 @@ function StepSegmentation({ s, set }) {
     }
   };
 
+  const tiles = Array.from({ length: s.numImages }, (_, i) => i);
+
   return (
-    <section style={S.card}>
-      <h2 style={S.h2}>Segmentation</h2>
-      <p style={S.muted}>Preview the segmentation on a single tile before running the full pipeline.</p>
+    <SectionBar title="Segmentation"
+      subtitle="Preview the segmentation on a single tile before running the full pipeline."
+      actions={
+        <button style={S.btnPrimary} onClick={continueToSelection}
+          disabled={s.pipelineStatus === "running"}>
+          Continue → Cell selection
+        </button>
+      }>
+      <div style={S.formStack}>
+        <FormField label="Method">
+          <select style={S.select} value={s.segMethod}
+            onChange={e => set({ segMethod: e.target.value })}>
+            {SEG_METHODS.map(m => (
+              <option key={m.id} value={m.id} disabled={!m.enabled}>
+                {m.label}{m.hint ? ` — ${m.hint}` : ""}
+              </option>
+            ))}
+          </select>
+        </FormField>
 
-      <div style={S.formGroup}>
-        <label style={S.label}>Method</label>
-        <select style={S.select} value={s.segMethod}
-          onChange={e => set({ segMethod: e.target.value })}>
-          {SEG_METHODS.map(m => (
-            <option key={m.id} value={m.id} disabled={!m.enabled}>
-              {m.label}{m.hint ? ` — ${m.hint}` : ""}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div style={{ display: "flex", gap: 20, marginTop: 20 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-          {Array.from({ length: s.numImages }, (_, i) => (
-            <button key={i} onClick={() => set({ previewImgIdx: i, previewMaskData: null })}
-              style={i === s.previewImgIdx ? { ...S.tileBtn, ...S.tileBtnActive } : S.tileBtn}>
-              {i + 1}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={S.canvasFrame}>
-            {rawImg ? (
-              <canvas ref={canvasRef} style={{ width: "100%", display: "block" }} />
-            ) : (
-              <div style={S.canvasPlaceholder}>Loading tile…</div>
-            )}
+        <FormField label="Preview tile">
+          <div style={S.tileRow}>
+            {tiles.map(i => (
+              <button key={i}
+                onClick={() => set({ previewImgIdx: i, previewMaskData: null })}
+                style={i === s.previewImgIdx
+                  ? { ...S.tileBtn, ...S.tileBtnActive } : S.tileBtn}>
+                {i + 1}
+              </button>
+            ))}
           </div>
-        </div>
+        </FormField>
 
-        <aside style={S.sidebar}>
-          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4, color: "#1A1A1A" }}>
-            Preview
-          </div>
-          <div style={{ ...S.caption, marginBottom: 16 }}>
-            {s.previewMaskData
-              ? `Tile ${s.previewImgIdx + 1} · ${s.previewNumCells} cells`
-              : `Tile ${s.previewImgIdx + 1} · no preview yet`}
+        <div style={S.previewLayout}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={S.canvasFrame}>
+              {rawImg ? (
+                <canvas ref={canvasRef} style={{ width: "100%", display: "block" }} />
+              ) : (
+                <div style={S.canvasPlaceholder}>Loading tile…</div>
+              )}
+            </div>
           </div>
 
-          <label style={S.controlLabel}>Overlay opacity · {Math.round(s.maskAlpha * 100)}%</label>
-          <input type="range" min={0} max={1} step={0.05} value={s.maskAlpha}
-            onChange={e => set({ maskAlpha: +e.target.value })}
-            style={{ ...S.slider, width: "100%", marginTop: 6 }}
-            disabled={!s.previewMaskData} />
+          <aside style={S.previewAside}>
+            <div style={S.formSectionTitle}>Preview</div>
+            <p style={{ ...S.caption, marginTop: 0, marginBottom: 12 }}>
+              {s.previewMaskData
+                ? `Tile ${s.previewImgIdx + 1} · ${s.previewNumCells} cells detected`
+                : `Tile ${s.previewImgIdx + 1} · no preview yet`}
+            </p>
 
-          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-            <button style={S.btnSecondary} onClick={runPreview}
+            <FormField label="Overlay opacity">
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <input type="range" min={0} max={1} step={0.05} value={s.maskAlpha}
+                  onChange={e => set({ maskAlpha: +e.target.value })}
+                  style={{ ...S.slider, flex: 1 }}
+                  disabled={!s.previewMaskData} />
+                <span style={{ ...S.caption, width: 36, textAlign: "right" }}>
+                  {Math.round(s.maskAlpha * 100)}%
+                </span>
+              </div>
+            </FormField>
+
+            <button style={{ ...S.btnSecondary, marginTop: 12, width: "100%" }}
+              onClick={runPreview}
               disabled={loadingPreview || s.pipelineStatus === "running"}>
               {loadingPreview ? "Running…" : "Run preview"}
             </button>
-          </div>
 
-          <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px solid #E5E7EB" }}>
-            <button style={{ ...S.btnPrimary, width: "100%" }}
-              onClick={continueToSelection}
-              disabled={s.pipelineStatus === "running"}>
-              Continue → Cell selection
-            </button>
-            <p style={{ ...S.caption, marginTop: 10 }}>
-              Runs the full segmentation + embedding pipeline on all {s.numImages} tiles.
+            <p style={{ ...S.caption, marginTop: 16 }}>
+              The <strong>Continue</strong> button runs the full segmentation +
+              embedding pipeline on all {s.numImages} tiles.
             </p>
-          </div>
-        </aside>
-      </div>
+          </aside>
+        </div>
 
-      {s.error && <p style={S.errorText}>{s.error}</p>}
-    </section>
+        {s.error && <p style={S.errorText}>{s.error}</p>}
+      </div>
+    </SectionBar>
   );
 }
 
@@ -463,35 +493,34 @@ function SelectionGallery({ s, set }) {
     });
   };
 
+  const count = s.selected.size;
   return (
-    <div style={S.gallery}>
-      <div style={S.galleryHeader}>
-        <span style={{ fontWeight: 600, color: "#111" }}>Selected cells</span>
-        <span style={S.caption}>{s.selected.size} cell{s.selected.size === 1 ? "" : "s"}</span>
-        {s.selected.size > 0 && (
-          <button style={S.linkBtn} onClick={() => set({ selected: new Set(), positive: [] })}>
-            Clear all
-          </button>
-        )}
-      </div>
-      {s.selected.size === 0 ? (
-        <p style={S.emptyMsg}>No cells selected yet. Pick a mode below to start.</p>
+    <SectionBar title="Selected cells"
+      count={count === 0 ? "none yet" : `${count} cell${count === 1 ? "" : "s"}`}
+      actions={count > 0 && (
+        <button style={S.textBtn}
+          onClick={() => set({ selected: new Set(), positive: [] })}>
+          Clear all
+        </button>
+      )}>
+      {count === 0 ? (
+        <p style={S.emptyMsg}>Pick a mode below to start selecting cells.</p>
       ) : (
         <div style={S.galleryGrid}>
           {thumbs.map(t => (
-            <div key={t.object_id} style={S.resultCard}>
+            <div key={t.object_id} style={{ ...S.resultCard, borderColor: "#BFDBFE" }}>
               <div style={S.thumbContainer}>
                 <img src={t.thumbnail_base64} alt="" style={S.thumbImg} />
               </div>
               <div style={S.cardFooter}>
-                <span style={{ color: "#374151", fontWeight: 500 }}>#{t.object_id}</span>
-                <button style={S.linkBtn} onClick={() => remove(t.object_id)}>Remove</button>
+                <span style={{ color: "#2563EB", fontWeight: 600 }}>#{t.object_id}</span>
+                <button style={S.textBtn} onClick={() => remove(t.object_id)}>Remove</button>
               </div>
             </div>
           ))}
         </div>
       )}
-    </div>
+    </SectionBar>
   );
 }
 
@@ -645,44 +674,47 @@ function SimilarityPanel({ s, set, toggle }) {
     </div>
   );
 
+  const tiles = Array.from({ length: s.numImages }, (_, i) => i);
+
   return (
-    <div>
-      <div style={{ display: "flex", gap: 20, marginTop: 8 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-          {Array.from({ length: s.numImages }, (_, i) => (
+    <div style={S.formStack}>
+      <FormField label="Tile">
+        <div style={S.tileRow}>
+          {tiles.map(i => (
             <button key={i} onClick={() => switchTile(i)}
-              style={i === s.imgIdx ? { ...S.tileBtn, ...S.tileBtnActive } : S.tileBtn}>
+              style={i === s.imgIdx
+                ? { ...S.tileBtn, ...S.tileBtnActive } : S.tileBtn}>
               {i + 1}
             </button>
           ))}
         </div>
+      </FormField>
 
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={S.canvasFrame}>
-            {s.imageData ? (
-              <canvas ref={canvasRef}
-                style={{ width: "100%", display: "block", cursor: "crosshair" }}
-                onClick={e => { const id = hitTest(e); if (id) toggle(id); }}
-                onMouseMove={e => setHovered(hitTest(e))}
-                onMouseLeave={() => setHovered(null)} />
-            ) : (
-              <div style={S.canvasPlaceholder}>Loading tile…</div>
-            )}
-          </div>
-          <p style={{ ...S.caption, marginTop: 8 }}>
-            {s.objects.length} cells on this tile · click to select
-          </p>
+      <div>
+        <div style={S.canvasFrame}>
+          {s.imageData ? (
+            <canvas ref={canvasRef}
+              style={{ width: "100%", display: "block", cursor: "crosshair" }}
+              onClick={e => { const id = hitTest(e); if (id) toggle(id); }}
+              onMouseMove={e => setHovered(hitTest(e))}
+              onMouseLeave={() => setHovered(null)} />
+          ) : (
+            <div style={S.canvasPlaceholder}>Loading tile…</div>
+          )}
         </div>
+        <p style={{ ...S.caption, marginTop: 6 }}>
+          {s.objects.length} cells on this tile · click to select
+        </p>
       </div>
 
-      <div style={{ ...S.controlBar, marginTop: 20 }}>
+      <div style={S.controlBar}>
         <div style={S.controlGroup}>
-          <label style={S.controlLabel}>Rejection strength · {s.alpha.toFixed(2)}</label>
+          <div style={S.formSectionTitle}>Rejection · {s.alpha.toFixed(2)}</div>
           <input type="range" min={0} max={1} step={0.05} value={s.alpha}
             onChange={e => set({ alpha: +e.target.value })} style={S.slider} />
         </div>
         <div style={S.controlGroup}>
-          <label style={S.controlLabel}>Min similarity · {s.threshold.toFixed(2)}</label>
+          <div style={S.formSectionTitle}>Min similarity · {s.threshold.toFixed(2)}</div>
           <input type="range" min={0} max={1} step={0.05} value={s.threshold}
             onChange={e => set({ threshold: +e.target.value })} style={S.slider} />
         </div>
@@ -704,7 +736,7 @@ function SimilarityPanel({ s, set, toggle }) {
             </div>
             {mostSimilar.length === 0 && <p style={S.emptyMsg}>No results above threshold.</p>}
           </div>
-          <div style={{ ...S.galleryDissimilar, marginTop: 16 }}>
+          <div style={S.galleryDissimilar}>
             <h3 style={S.galleryTitleRed}>Most dissimilar</h3>
             <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 1fr)`, gap: 10 }}>
               {mostDissimilar.map(r => <ResultCard key={r.object_id} r={r} />)}
@@ -729,7 +761,7 @@ const CLASSIC_FEATURES = [
 
 function ClassicPanel() {
   return (
-    <div>
+    <div style={S.formStack}>
       <div style={S.banner}>
         Feature extraction endpoint not implemented. The controls below show the
         intended UI; they will activate once <code>POST /api/features/classic</code>
@@ -747,7 +779,7 @@ function ClassicPanel() {
           </div>
         ))}
       </div>
-      <div style={{ marginTop: 20 }}>
+      <div>
         <button style={S.btnPrimary} disabled>Apply filter</button>
       </div>
     </div>
@@ -756,59 +788,56 @@ function ClassicPanel() {
 
 function ClusteringPanel() {
   return (
-    <div>
+    <div style={S.formStack}>
       <div style={S.banner}>
         KNN graph + Leiden endpoint not implemented. The controls below show the
         intended UI; they will activate once <code>POST /api/cluster</code> lands
         (WORKFLOW.md §5).
       </div>
-      <div style={S.formGroup}>
-        <label style={S.label}>Feature source</label>
-        <div style={{ display: "flex", gap: 16, marginTop: 4 }}>
-          <label style={{ ...S.radioLabel, opacity: 0.6 }}>
-            <input type="radio" disabled /> Classic features
-          </label>
-          <label style={{ ...S.radioLabel, opacity: 0.6 }}>
-            <input type="radio" disabled defaultChecked /> DINOv2 deep features
-          </label>
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 24, marginTop: 20, flexWrap: "wrap" }}>
-        <div style={S.formGroup}>
-          <label style={S.label}>Neighbors (k)</label>
+      <FormField label="Feature source">
+        <ToggleGroup value="dinov2" onChange={() => {}} disabled
+          options={[
+            { value: "classic", label: "Classic features" },
+            { value: "dinov2", label: "DINOv2 deep features" },
+          ]} />
+      </FormField>
+      <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+        <FormField label="Neighbors (k)">
           <input style={{ ...S.input, width: 120 }} type="number" disabled defaultValue={15} />
-        </div>
-        <div style={S.formGroup}>
-          <label style={S.label}>Leiden resolution</label>
+        </FormField>
+        <FormField label="Leiden resolution">
           <input style={{ ...S.input, width: 120 }} type="number" disabled
             defaultValue={1.0} step={0.1} />
-        </div>
+        </FormField>
       </div>
-      <div style={{ marginTop: 20 }}>
+      <div>
         <button style={S.btnPrimary} disabled>Compute clusters</button>
       </div>
-      <div style={{ ...S.emptyMsg, marginTop: 24 }}>
+      <p style={S.emptyMsg}>
         Cluster list will appear here. Click a cluster to add all its members
         to the selection.
-      </div>
+      </p>
     </div>
   );
 }
 
 function StepSelection({ s, set, toggle }) {
   if (s.pipelineStatus !== "done") {
+    const subtitle =
+      s.pipelineStatus === "running"
+        ? "Running segmentation and embedding on all tiles."
+        : s.pipelineStatus === "error"
+        ? "Pipeline failed. Go back and try again."
+        : "Finish segmentation before picking cells.";
     return (
-      <section style={S.card}>
-        <h2 style={S.h2}>Cell Selection</h2>
-        <p style={S.muted}>
-          {s.pipelineStatus === "running"
-            ? "Running segmentation and embedding on all tiles."
-            : s.pipelineStatus === "error"
-            ? "Pipeline failed. Go back and try again."
-            : "Finish segmentation before picking cells."}
-        </p>
+      <SectionBar title="Cell Selection" subtitle={subtitle}
+        actions={
+          <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>
+            Back to Segmentation
+          </button>
+        }>
         {s.pipelineStatus === "running" && (
-          <div style={{ marginTop: 12 }}>
+          <div>
             <div style={S.progressTrack}>
               <div style={{ ...S.progressFill, width: `${(s.progress || 0) * 100}%` }} />
             </div>
@@ -816,35 +845,27 @@ function StepSelection({ s, set, toggle }) {
           </div>
         )}
         {s.error && <p style={S.errorText}>{s.error}</p>}
-        <div style={{ marginTop: 20 }}>
-          <button style={S.btnSecondary} onClick={() => set({ step: 2 })}>Back to Segmentation</button>
-        </div>
-      </section>
+      </SectionBar>
     );
   }
 
   const mode = SEL_MODES.find(m => m.id === s.selMode) || SEL_MODES[0];
   return (
-    <section style={S.card}>
-      <h2 style={S.h2}>Cell Selection</h2>
-      <p style={S.muted}>{mode.label}. Pick cells below; your selection is shown at the top.</p>
-
+    <div style={S.stepStack}>
       <SelectionGallery s={s} set={set} />
 
-      <div style={{ ...S.formGroup, marginTop: 20 }}>
-        <label style={S.label}>Mode</label>
-        <select style={S.select} value={s.selMode}
-          onChange={e => set({ selMode: e.target.value })}>
-          {SEL_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-        </select>
-      </div>
-
-      <div style={{ marginTop: 20 }}>
+      <SectionBar title="Cell Selection" subtitle={`${mode.label}.`}
+        actions={
+          <select style={S.selectCompact} value={s.selMode}
+            onChange={e => set({ selMode: e.target.value })}>
+            {SEL_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        }>
         {s.selMode === "similarity" && <SimilarityPanel s={s} set={set} toggle={toggle} />}
         {s.selMode === "classic" && <ClassicPanel />}
         {s.selMode === "clustering" && <ClusteringPanel />}
-      </div>
-    </section>
+      </SectionBar>
+    </div>
   );
 }
 
@@ -867,28 +888,30 @@ export default function App() {
   };
   return (
     <div style={S.root}>
-      <header style={S.header}>
-        <span style={S.logo}>Smart Selection</span>
-        <nav style={{ display: "flex", gap: 4 }}>
-          {steps.map((label, i) => {
-            const idx = i + 1;
-            const reachable = canNav(idx);
-            return (
-              <span key={idx}
-                onClick={() => { if (reachable) set({ step: idx }); }}
-                style={{
-                  ...S.stepPill,
-                  ...(s.step === idx ? S.stepPillActive : {}),
-                  ...(s.step > idx ? S.stepPillDone : {}),
-                  cursor: reachable ? "pointer" : "default",
-                  opacity: reachable ? 1 : 0.5,
-                }}>
-                {idx}. {label}
-              </span>
-            );
-          })}
-        </nav>
-      </header>
+      <div style={S.headerWrap}>
+        <header style={S.header}>
+          <span style={S.logo}>Smart Selection</span>
+          <nav style={{ display: "flex", gap: 2 }}>
+            {steps.map((label, i) => {
+              const idx = i + 1;
+              const reachable = canNav(idx);
+              return (
+                <span key={idx}
+                  onClick={() => { if (reachable) set({ step: idx }); }}
+                  style={{
+                    ...S.stepPill,
+                    ...(s.step === idx ? S.stepPillActive : {}),
+                    ...(s.step > idx ? S.stepPillDone : {}),
+                    cursor: reachable ? "pointer" : "default",
+                    opacity: reachable ? 1 : 0.45,
+                  }}>
+                  {idx}. {label}
+                </span>
+              );
+            })}
+          </nav>
+        </header>
+      </div>
       <main style={S.main}>
         {s.step === 1 && <StepDataset s={s} set={set} />}
         {s.step === 2 && <StepSegmentation s={s} set={set} />}
@@ -902,173 +925,220 @@ export default function App() {
 
 const S = {
   root: {
-    minHeight: "100vh", background: "#F4F5F7",
+    minHeight: "100vh", background: "#F3F4F6",
     fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-    color: "#1A1A1A", fontSize: 15,
+    color: "#1A1A1A", fontSize: 14,
+  },
+  headerWrap: {
+    background: "#fff", borderBottom: "1px solid #E5E7EB",
+    boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
   },
   header: {
-    background: "#fff", borderBottom: "1px solid #E2E4E9",
-    padding: "16px 32px", display: "flex", justifyContent: "space-between", alignItems: "center",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+    maxWidth: 1160, margin: "0 auto", padding: "14px 24px",
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    boxSizing: "border-box",
   },
-  logo: { fontWeight: 700, fontSize: 20, letterSpacing: "-0.03em", color: "#111" },
-  main: { maxWidth: 1400, margin: "32px auto", padding: "0 32px" },
+  logo: { fontWeight: 700, fontSize: 18, letterSpacing: "-0.03em", color: "#111" },
+  main: { maxWidth: 1160, margin: "24px auto", padding: "0 24px" },
 
   stepPill: {
-    padding: "8px 16px", fontSize: 14, color: "#9CA3AF", borderRadius: 8,
-    fontWeight: 500, transition: "all 0.15s",
+    padding: "6px 14px", fontSize: 13, color: "#9CA3AF", borderRadius: 6,
+    fontWeight: 500, transition: "all 0.15s", userSelect: "none",
   },
   stepPillActive: { background: "#EFF6FF", color: "#2563EB", fontWeight: 600 },
   stepPillDone: { color: "#16A34A" },
 
-  card: {
-    background: "#fff", border: "1px solid #E2E4E9", borderRadius: 16,
-    padding: 32, boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+  // Stacks between sections / within a section body
+  stepStack: { display: "flex", flexDirection: "column", gap: 16 },
+  formStack: { display: "flex", flexDirection: "column", gap: 18 },
+
+  // SectionBar shell
+  section: {
+    background: "#fff", border: "1px solid #E5E7EB", borderRadius: 12,
+    borderLeft: "4px solid #E5E7EB",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.04)", overflow: "hidden",
+  },
+  sectionHeader: {
+    display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
+    padding: "12px 20px", borderBottom: "1px solid #F3F4F6", background: "#FAFBFC",
+  },
+  sectionTitle: {
+    fontSize: 15, fontWeight: 700, margin: 0, letterSpacing: "-0.01em",
+  },
+  sectionCount: { fontSize: 13, fontWeight: 500, color: "#9CA3AF" },
+  sectionActions: { display: "flex", gap: 8, alignItems: "center" },
+  sectionBody: { padding: 20 },
+
+  // Typography
+  muted: { color: "#6B7280", fontSize: 13, margin: "0 0 14px", lineHeight: 1.55 },
+  caption: { fontSize: 12, color: "#6B7280", margin: 0, lineHeight: 1.5 },
+  formSectionTitle: {
+    fontSize: 11, fontWeight: 700, color: "#9CA3AF",
+    textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6,
   },
 
-  h2: { fontSize: 22, fontWeight: 700, margin: "0 0 6px", letterSpacing: "-0.02em", color: "#111" },
-  muted: { color: "#6B7280", fontSize: 15, margin: "0 0 16px", lineHeight: 1.6 },
-  caption: { fontSize: 14, color: "#6B7280", margin: 0 },
-
-  formGroup: { display: "flex", flexDirection: "column" },
-  label: { display: "block", fontSize: 14, fontWeight: 600, color: "#374151", marginBottom: 6 },
+  // Form controls
   input: {
-    border: "1px solid #D1D5DB", borderRadius: 8, padding: "10px 14px", fontSize: 15,
-    width: "100%", maxWidth: 560, outline: "none", boxSizing: "border-box",
-    transition: "border-color 0.15s", fontFamily: "inherit",
+    border: "1px solid #D1D5DB", borderRadius: 8, padding: "8px 12px", fontSize: 13,
+    color: "#374151", width: "100%", maxWidth: 520, outline: "none",
+    boxSizing: "border-box", transition: "border-color 0.15s", fontFamily: "inherit",
+    background: "#fff",
   },
   select: {
-    border: "1px solid #D1D5DB", borderRadius: 8, padding: "10px 14px", fontSize: 15,
-    width: "100%", maxWidth: 360, outline: "none", boxSizing: "border-box",
+    border: "1px solid #D1D5DB", borderRadius: 8, padding: "8px 12px", fontSize: 13,
+    width: "100%", maxWidth: 320, outline: "none", boxSizing: "border-box",
     background: "#fff", color: "#1A1A1A", fontFamily: "inherit", cursor: "pointer",
   },
-  radioLabel: {
-    fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
-    color: "#374151",
+  selectCompact: {
+    border: "1px solid #D1D5DB", borderRadius: 8, padding: "6px 10px", fontSize: 13,
+    background: "#fff", color: "#1A1A1A", fontFamily: "inherit", cursor: "pointer",
+    outline: "none",
   },
   numInput: {
-    border: "1px solid #D1D5DB", borderRadius: 6, padding: "6px 10px", fontSize: 14,
+    border: "1px solid #D1D5DB", borderRadius: 6, padding: "6px 10px", fontSize: 13,
     width: 80, outline: "none", boxSizing: "border-box", background: "#F9FAFB",
     color: "#6B7280", fontFamily: "inherit",
   },
 
+  // Toggle group (tab pills)
+  toggleGroup: {
+    display: "inline-flex", gap: 1, background: "#F3F4F6",
+    borderRadius: 6, padding: 2,
+  },
+  toggleBtn: {
+    padding: "5px 12px", fontSize: 12, fontWeight: 500, border: "none",
+    background: "transparent", color: "#6B7280", borderRadius: 4,
+    cursor: "pointer", transition: "all 0.15s", fontFamily: "inherit",
+  },
+  toggleBtnActive: {
+    background: "#fff", color: "#111", fontWeight: 600,
+    boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
+  },
+
+  // Buttons
   btnPrimary: {
     background: "#2563EB", color: "#fff", border: "none", borderRadius: 8,
-    padding: "10px 24px", fontSize: 15, fontWeight: 600, cursor: "pointer",
-    transition: "background 0.15s", letterSpacing: "-0.01em",
+    padding: "8px 20px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+    transition: "background 0.15s",
   },
   btnSecondary: {
     background: "#fff", color: "#374151", border: "1px solid #D1D5DB", borderRadius: 8,
-    padding: "10px 20px", fontSize: 14, fontWeight: 500, cursor: "pointer",
+    padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer",
     transition: "background 0.15s",
   },
-  linkBtn: {
-    background: "none", border: "none", color: "#DC2626", fontSize: 13,
-    cursor: "pointer", padding: 0, fontWeight: 500,
+  textBtn: {
+    background: "none", border: "none", color: "#9CA3AF", fontSize: 12,
+    cursor: "pointer", padding: "4px 8px", fontWeight: 500, fontFamily: "inherit",
   },
 
+  // Progress / error
   progressTrack: { height: 8, background: "#E5E7EB", borderRadius: 4, overflow: "hidden" },
   progressFill: { height: "100%", background: "#2563EB", borderRadius: 4, transition: "width 0.4s ease" },
-  errorText: { color: "#DC2626", fontSize: 14, marginTop: 16, fontWeight: 500 },
+  errorText: { color: "#DC2626", fontSize: 13, marginTop: 12, fontWeight: 500 },
 
+  // Tile row
+  tileRow: { display: "flex", flexWrap: "wrap", gap: 6 },
   tileBtn: {
-    width: 48, height: 48, border: "1px solid #D1D5DB", background: "#fff",
-    borderRadius: 10, cursor: "pointer", fontSize: 16, fontWeight: 700,
-    color: "#6B7280", display: "flex", alignItems: "center", justifyContent: "center",
-    transition: "all 0.15s",
+    minWidth: 36, height: 36, padding: "0 10px",
+    border: "1px solid #D1D5DB", background: "#fff", borderRadius: 8,
+    cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#6B7280",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    transition: "all 0.15s", fontFamily: "inherit",
   },
   tileBtnActive: {
-    border: "2px solid #2563EB", background: "#EFF6FF", color: "#2563EB",
+    background: "#2563EB", color: "#fff", borderColor: "#2563EB",
   },
 
+  // Canvas
   canvasFrame: {
-    border: "1px solid #E2E4E9", borderRadius: 12, overflow: "hidden", background: "#111",
-    minHeight: 200,
+    border: "1px solid #E5E7EB", borderRadius: 10, overflow: "hidden",
+    background: "#0A0A0A", minHeight: 200,
   },
   canvasPlaceholder: {
-    padding: "80px 0", textAlign: "center", color: "#9CA3AF", fontSize: 14,
+    padding: "80px 0", textAlign: "center", color: "#9CA3AF", fontSize: 13,
   },
 
-  sidebar: {
-    width: 260, flexShrink: 0, background: "#FAFBFC", border: "1px solid #E2E4E9",
-    borderRadius: 12, padding: 16, display: "flex", flexDirection: "column",
+  // Step 2 preview layout (canvas + side panel)
+  previewLayout: { display: "flex", gap: 20, alignItems: "flex-start" },
+  previewAside: {
+    width: 240, flexShrink: 0, background: "#FAFBFC",
+    border: "1px solid #E5E7EB", borderRadius: 10, padding: 16,
+    display: "flex", flexDirection: "column",
   },
 
-  gallery: {
-    background: "#FAFBFC", border: "1px solid #E2E4E9", borderRadius: 12,
-    padding: 16, marginTop: 4,
-  },
-  galleryHeader: {
-    display: "flex", alignItems: "center", gap: 12, marginBottom: 12,
-  },
+  // Gallery
   galleryGrid: {
-    display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10,
+    display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10,
   },
-
   resultCard: {
-    border: "1px solid #E2E4E9", borderRadius: 10, overflow: "hidden", background: "#fff",
+    border: "1px solid #E5E7EB", borderRadius: 8, overflow: "hidden", background: "#fff",
     transition: "box-shadow 0.15s",
   },
   thumbContainer: {
     width: "100%", aspectRatio: "1", background: "#0A0A0A",
     display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
-    borderRadius: "9px 9px 0 0",
   },
   thumbImg: { maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" },
   cardFooter: {
-    padding: "10px 12px", display: "flex", justifyContent: "space-between",
-    alignItems: "center", fontSize: 14, color: "#6B7280",
+    padding: "8px 10px", display: "flex", justifyContent: "space-between",
+    alignItems: "center", fontSize: 12, color: "#6B7280",
   },
   acceptBtn: {
-    flex: 1, padding: 10, border: "none", borderTop: "1px solid #E2E4E9",
-    background: "#F0FDF4", color: "#16A34A", fontSize: 14, fontWeight: 600,
-    cursor: "pointer", transition: "background 0.15s",
+    flex: 1, padding: 8, border: "none", borderTop: "1px solid #E5E7EB",
+    background: "#F0FDF4", color: "#16A34A", fontSize: 12, fontWeight: 600,
+    cursor: "pointer", transition: "background 0.15s", fontFamily: "inherit",
   },
   rejectBtn: {
-    flex: 1, padding: 10, border: "none", borderTop: "1px solid #E2E4E9",
-    borderLeft: "1px solid #E2E4E9", background: "#FEF2F2", color: "#DC2626",
-    fontSize: 14, fontWeight: 600, cursor: "pointer", transition: "background 0.15s",
+    flex: 1, padding: 8, border: "none", borderTop: "1px solid #E5E7EB",
+    borderLeft: "1px solid #E5E7EB", background: "#FEF2F2", color: "#DC2626",
+    fontSize: 12, fontWeight: 600, cursor: "pointer",
+    transition: "background 0.15s", fontFamily: "inherit",
   },
 
+  // Similarity control bar
   controlBar: {
-    display: "flex", gap: 24, alignItems: "flex-end", padding: "16px 20px",
-    background: "#FAFBFC", borderRadius: 12, border: "1px solid #E2E4E9",
-    flexWrap: "wrap", marginBottom: 20,
+    display: "flex", gap: 20, alignItems: "flex-end", padding: "14px 16px",
+    background: "#FAFBFC", borderRadius: 10, border: "1px solid #E5E7EB",
+    flexWrap: "wrap",
   },
-  controlGroup: { display: "flex", flexDirection: "column", gap: 6 },
-  controlLabel: { fontSize: 13, color: "#6B7280", fontWeight: 500 },
-  slider: { width: 180, accentColor: "#2563EB" },
+  controlGroup: { display: "flex", flexDirection: "column", gap: 4 },
+  slider: { width: 160, accentColor: "#2563EB" },
 
+  // Result galleries
   gallerySimilar: {
-    padding: 20, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 12,
+    padding: 16, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 10,
   },
   galleryDissimilar: {
-    padding: 20, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 12,
+    padding: 16, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 10,
   },
   galleryTitleGreen: {
-    fontSize: 16, fontWeight: 700, margin: "0 0 14px", color: "#16A34A", letterSpacing: "-0.01em",
+    fontSize: 13, fontWeight: 700, margin: "0 0 12px", color: "#16A34A",
+    textTransform: "uppercase", letterSpacing: "0.04em",
   },
   galleryTitleRed: {
-    fontSize: 16, fontWeight: 700, margin: "0 0 14px", color: "#DC2626", letterSpacing: "-0.01em",
+    fontSize: 13, fontWeight: 700, margin: "0 0 12px", color: "#DC2626",
+    textTransform: "uppercase", letterSpacing: "0.04em",
   },
   emptyMsg: {
-    textAlign: "center", color: "#9CA3AF", padding: "24px 0", fontSize: 14, margin: 0,
+    textAlign: "center", color: "#9CA3AF", padding: "20px 0", fontSize: 13, margin: 0,
   },
 
+  // Stub banner (Classic / Clustering)
   banner: {
     background: "#FFFBEB", border: "1px solid #FDE68A", color: "#78350F",
-    borderRadius: 10, padding: "12px 16px", fontSize: 14, lineHeight: 1.55,
-    marginBottom: 20,
+    borderRadius: 8, padding: "10px 14px", fontSize: 13, lineHeight: 1.5,
+    marginBottom: 16,
   },
 
-  featureTable: { display: "flex", flexDirection: "column", gap: 10 },
+  // Feature table (Classic stub)
+  featureTable: { display: "flex", flexDirection: "column", gap: 8 },
   featureRow: {
     display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "10px 14px", background: "#FAFBFC", border: "1px solid #E2E4E9",
+    padding: "8px 12px", background: "#FAFBFC", border: "1px solid #E5E7EB",
     borderRadius: 8,
   },
-  featureLabel: { fontSize: 14, color: "#374151", fontWeight: 500 },
+  featureLabel: { fontSize: 13, color: "#374151", fontWeight: 500 },
   rangeInputs: { display: "flex", alignItems: "center", gap: 8 },
-  rangeDash: { color: "#9CA3AF", fontSize: 14 },
+  rangeDash: { color: "#9CA3AF", fontSize: 13 },
 };
 
