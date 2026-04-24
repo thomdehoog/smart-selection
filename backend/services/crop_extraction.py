@@ -328,13 +328,15 @@ def extract_all_crops(
     """
     crops = []
     for obj in objects:
-        mask_label = obj.get("mask_label", obj["object_id"])
+        mask_label = obj.get("mask_label")
+        if mask_label is None:
+            mask_label = obj.get("object_id")
         if not size_invariant and fixed_size is not None:
             crop = extract_crop_fixed(
                 image, obj["centroid"], fixed_size,
                 masks=masks, object_id=mask_label, crop_mode=crop_mode,
             )
-        elif crop_mode == "single_cell" and masks is not None:
+        elif crop_mode == "single_cell" and masks is not None and mask_label is not None:
             crop = extract_crop_masked(
                 image, masks, mask_label, obj["centroid"], obj["bbox"], multiplier
             )

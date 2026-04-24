@@ -8,7 +8,7 @@ so the accept/reject/recompute loop actually works.
 
 Usage:
     python mock_server.py
-    # Frontend connects to http://localhost:5000
+    # Frontend connects to http://localhost:5050
 """
 
 import io
@@ -17,7 +17,17 @@ import random
 import time
 import numpy as np
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+try:
+    from flask_cors import CORS
+except ImportError:
+    def CORS(app):
+        @app.after_request
+        def add_cors_headers(response):
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            return response
+        return app
 from PIL import Image, ImageDraw
 
 app = Flask(__name__)
@@ -29,6 +39,7 @@ NUM_IMAGES = 5
 CELLS_PER_IMAGE = 30
 IMAGE_W, IMAGE_H = 1024, 1024
 EMBED_DIM = 768
+MOCK_PORT = 5050
 
 # Generate cell metadata for all images
 ALL_OBJECTS = []
@@ -90,8 +101,24 @@ def make_overview_image(img_idx, size=1024):
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
+def make_mask_image(img_idx, size=1024):
+    """Encode synthetic cell IDs into the R/G channels like the real backend."""
+    img = Image.new("RGB", (size, size), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    for obj in ALL_OBJECTS:
+        if obj["image_index"] != img_idx:
+            continue
+        oid = obj["object_id"]
+        color = (oid & 0xFF, (oid >> 8) & 0xFF, 0)
+        draw.ellipse(obj["bbox"], fill=color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+
 # Pre-generate overview images (avoid regenerating on every request)
 IMAGE_CACHE = {i: make_overview_image(i) for i in range(NUM_IMAGES)}
+MASK_CACHE = {i: make_mask_image(i) for i in range(NUM_IMAGES)}
 
 
 # ─── API Routes ──────────────────────────────────────────────────────────────
@@ -143,6 +170,24 @@ def status():
     })
 
 
+@app.route("/api/segment_preview", methods=["POST"])
+def segment_preview():
+    data = request.json or {}
+    img_idx = data.get("image_index")
+    if not isinstance(img_idx, int) or isinstance(img_idx, bool):
+        return jsonify({"error": "image_index (int) is required."}), 400
+    if img_idx < 0 or img_idx >= NUM_IMAGES:
+        return jsonify({"error": f"image_index out of range (0..{NUM_IMAGES - 1})."}), 400
+
+    return jsonify({
+        "image_index": img_idx,
+        "width": IMAGE_W,
+        "height": IMAGE_H,
+        "num_cells": CELLS_PER_IMAGE,
+        "mask_base64": MASK_CACHE[img_idx],
+    })
+
+
 @app.route("/api/image/<int:img_idx>", methods=["GET"])
 def get_image(img_idx):
     if img_idx >= NUM_IMAGES:
@@ -152,6 +197,16 @@ def get_image(img_idx):
         "width": IMAGE_W,
         "height": IMAGE_H,
         "thumbnail_base64": IMAGE_CACHE[img_idx],
+    })
+
+
+@app.route("/api/mask/<int:img_idx>", methods=["GET"])
+def get_mask(img_idx):
+    if img_idx < 0 or img_idx >= NUM_IMAGES:
+        return jsonify({"error": "Mask not found"}), 404
+    return jsonify({
+        "image_index": img_idx,
+        "mask_base64": MASK_CACHE[img_idx],
     })
 
 
@@ -228,6 +283,42 @@ def search():
     })
 
 
+@app.route("/api/search_dissimilar", methods=["POST"])
+def search_dissimilar():
+    data = request.json or {}
+    pos_ids = data.get("positive_ids", [])
+    top_k = data.get("top_k", 28)
+
+    pos_idx = [oid - 1 for oid in pos_ids if 1 <= oid <= len(ALL_OBJECTS)]
+    if not pos_idx:
+        return jsonify({"error": "At least one positive example required."}), 400
+
+    query = EMBEDDINGS[pos_idx].mean(axis=0)
+    query /= np.linalg.norm(query) + 1e-8
+    scores = EMBEDDINGS @ query
+
+    exclude = set(pos_ids)
+    ranked = np.argsort(scores)
+
+    results = []
+    for idx in ranked:
+        oid = ALL_OBJECTS[idx]["object_id"]
+        if oid in exclude:
+            continue
+        results.append({
+            "object_id": oid,
+            "image_index": ALL_OBJECTS[idx]["image_index"],
+            "similarity_score": round(float(scores[idx]), 4),
+            "centroid": ALL_OBJECTS[idx]["centroid"],
+            "area": ALL_OBJECTS[idx]["area"],
+            "thumbnail_base64": make_cell_thumbnail(oid),
+        })
+        if len(results) >= top_k:
+            break
+
+    return jsonify({"results": results})
+
+
 @app.route("/api/export", methods=["POST"])
 def export():
     ids = request.json.get("accepted_ids", [])
@@ -244,5 +335,5 @@ if __name__ == "__main__":
     print("Mock Backend — Microscopy Semantic Search")
     print(f"Dataset: {NUM_IMAGES} images, {len(ALL_OBJECTS)} cells, {EMBED_DIM}d embeddings")
     print("Pipeline simulates 5s processing. Search uses real cosine similarity.")
-    print("http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    print(f"http://localhost:{MOCK_PORT}\n")
+    app.run(host="0.0.0.0", port=MOCK_PORT, debug=False)
