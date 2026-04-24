@@ -7,10 +7,20 @@ uploads/
 __pycache__/
 *.pyc
 .pytest_cache/
+backend/pytest-cache-files-*/
+backend/py_mkdir_700_probe/
+backend/tmp*/
+py_root_mkdir_700_probe/
 
 # Node
 frontend/node_modules/
 frontend/dist/
+frontend/.dev-dist/
+frontend/.npm-cache/
+
+# Local runtime output
+*.log
+codex_git_tmp_*/
 
 # OS
 .DS_Store
