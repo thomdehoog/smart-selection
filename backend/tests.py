@@ -24,6 +24,28 @@ sys.path.insert(0, os.path.dirname(__file__))
 class TestImageIO:
     """Tests for image loading, normalization, and thumbnail generation."""
 
+    def test_resolve_image_dir_checks_repo_root(self, monkeypatch):
+        """Repo-root relative dataset presets should work when Flask starts in backend/."""
+        from services.image_io import resolve_image_dir
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        rel_path = "./bbbc021_raw/Week1_22123/"
+        expected = os.path.abspath(os.path.join(repo_root, rel_path))
+        checked = []
+
+        def fake_isdir(path):
+            resolved = os.path.abspath(path)
+            checked.append(resolved)
+            return os.path.normcase(resolved) == os.path.normcase(expected)
+
+        monkeypatch.setattr(os.path, "isdir", fake_isdir)
+        monkeypatch.chdir(os.path.dirname(__file__))
+
+        resolved = resolve_image_dir(rel_path, base_dirs=[repo_root])
+        assert os.path.normcase(resolved) == os.path.normcase(expected)
+        assert os.path.abspath(rel_path) in checked
+        assert expected in checked
+
     def test_load_tiff_hwc(self, tmp_path):
         """Loading a (H, W, 3) TIFF should return the array as-is in float32."""
         import tifffile

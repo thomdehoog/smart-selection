@@ -502,6 +502,9 @@ function SelectionGallery({ s, set }) {
     return {
       selected,
       positive: prev.positive.filter(x => x !== id),
+      negative: prev.negative.filter(x => x !== id),
+      results: prev.results.filter(r => r.object_id !== id),
+      dissimilar: prev.dissimilar.filter(r => r.object_id !== id),
     };
   });
 
@@ -511,7 +514,13 @@ function SelectionGallery({ s, set }) {
       count={count === 0 ? "none yet" : `${count} cell${count === 1 ? "" : "s"}`}
       actions={count > 0 && (
         <button style={S.textBtn}
-          onClick={() => set({ selected: new Set(), positive: [] })}>
+          onClick={() => set({
+            selected: new Set(),
+            positive: [],
+            negative: [],
+            results: [],
+            dissimilar: [],
+          })}>
           Clear all
         </button>
       )}>
@@ -585,11 +594,18 @@ function computeMaskBboxes(data, w, h) {
 // order — the earlier cleanup runs before the later response lands.
 function useTileData(imgIdx, enabled, set) {
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      set({ imageData: null, objects: [] });
+      return;
+    }
     let cancelled = false;
+    set({ imageData: null, objects: [], error: null });
     Promise.all([api.image(imgIdx), api.objects(imgIdx)])
       .then(([img, obj]) => {
-        if (!cancelled) set({ imageData: img, objects: obj.objects || [] });
+        if (cancelled) return;
+        const imageIndex = Number.isInteger(img.image_index) ? img.image_index : imgIdx;
+        if (imageIndex !== imgIdx) return;
+        set({ imageData: { ...img, image_index: imageIndex }, objects: obj.objects || [] });
       })
       .catch(e => { if (!cancelled) set({ error: e.message }); });
     return () => { cancelled = true; };
@@ -632,8 +648,10 @@ function SimilarityPanel({ s, set, toggle }) {
 
   const onMaskError = useCallback(e => set({ error: e.message }), [set]);
   useTileData(s.imgIdx, s.pipelineStatus === "done", set);
-  const rawImgEl = useDecodedImage(s.imageData && s.imageData.thumbnail_base64);
-  const mask = useTileMask(s.imgIdx, !!s.imageData, onMaskError);
+  const currentImageData = s.imageData && s.imageData.image_index === s.imgIdx ? s.imageData : null;
+  const currentObjects = currentImageData ? s.objects : [];
+  const rawImgEl = useDecodedImage(currentImageData && currentImageData.thumbnail_base64);
+  const mask = useTileMask(s.imgIdx, !!currentImageData, onMaskError);
 
   // brightCv (raw tile on an offscreen canvas, used for the `source-in`
   // clipping composite) depends only on the decoded image.
@@ -721,7 +739,12 @@ function SimilarityPanel({ s, set, toggle }) {
         api.searchDissimilar(pos, 28),
       ]);
       if (seq !== searchSeqRef.current) return;
-      set({ positive: pos, results: sim.results || [], dissimilar: dis.results || [] });
+      set(prev => {
+        const selectionUnchanged = prev.selected.size === pos.length
+          && pos.every(id => prev.selected.has(id));
+        if (!selectionUnchanged) return {};
+        return { positive: pos, results: sim.results || [], dissimilar: dis.results || [] };
+      });
     } catch (e) {
       if (seq === searchSeqRef.current) set({ error: e.message });
     } finally {
@@ -768,7 +791,7 @@ function SimilarityPanel({ s, set, toggle }) {
 
       <div>
         <div style={S.canvasFrame}>
-          {s.imageData ? (
+          {currentImageData ? (
             <canvas ref={canvasRef}
               style={{ width: "100%", display: "block", cursor: "crosshair" }}
               onClick={e => { const id = hitTest(e); if (id) toggle(id); }}
@@ -779,7 +802,7 @@ function SimilarityPanel({ s, set, toggle }) {
           )}
         </div>
         <p style={{ ...S.caption, marginTop: 6 }}>
-          {s.objects.length} cells on this tile · click to select
+          {currentObjects.length} cells on this tile · click to select
         </p>
       </div>
 

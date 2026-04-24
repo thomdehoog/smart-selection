@@ -9,11 +9,21 @@ import os
 import uuid
 import numpy as np
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+try:
+    from flask_cors import CORS
+except ImportError:
+    def CORS(app):
+        @app.after_request
+        def add_cors_headers(response):
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            return response
+        return app
 
 from config import FLASK_HOST, FLASK_PORT, UPLOAD_DIR
 from models.dataset import create_dataset, get_dataset, DatasetState
-from services.image_io import load_bbbc021_first_n, make_thumbnail
+from services.image_io import load_bbbc021_first_n, make_thumbnail, resolve_image_dir
 from services.indexing import search, search_dissimilar
 from services.segmentation import segment_cells
 from pipeline import run_pipeline_async
@@ -23,9 +33,13 @@ import base64
 from PIL import Image
 
 app = Flask(__name__)
-CORS(app)  # Allow React frontend on localhost:3000 to call Flask on :5000
+CORS(app)  # Allow the Vite frontend to call Flask on :5050
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(APP_DIR)
 
 
 # ─── Upload & Configure ─────────────────────────────────────────────────────
@@ -47,8 +61,9 @@ def upload_bbbc021():
     image_dir = data.get("image_dir")
     n = data.get("n", 5)
     channel_names = data.get("channel_names", ["DAPI", "Tubulin", "Actin"])
+    resolved_image_dir = resolve_image_dir(image_dir, base_dirs=[REPO_ROOT, APP_DIR])
 
-    if not image_dir or not os.path.isdir(image_dir):
+    if resolved_image_dir is None:
         return jsonify({"error": f"Invalid image directory: {image_dir}"}), 400
 
     # Create a new dataset
@@ -57,8 +72,8 @@ def upload_bbbc021():
     state.channel_names = channel_names
 
     # Load images into memory
-    print(f"\nLoading BBBC021 images from {image_dir} (n={n})...")
-    images = load_bbbc021_first_n(image_dir, n=n)
+    print(f"\nLoading BBBC021 images from {resolved_image_dir} (n={n})...")
+    images = load_bbbc021_first_n(resolved_image_dir, n=n)
 
     if not images:
         return jsonify({"error": "No valid 3-channel images found"}), 400
@@ -201,7 +216,10 @@ def get_mask(image_index: int):
     label_to_id = {}
     for obj in state.objects:
         if obj["image_index"] == image_index:
-            label_to_id[obj.get("mask_label", obj["object_id"])] = obj["object_id"]
+            mask_label = obj.get("mask_label")
+            if mask_label is None:
+                mask_label = obj["object_id"]
+            label_to_id[mask_label] = obj["object_id"]
 
     # Encode mask: remap labels to global IDs, then encode in RGB
     h, w = masks.shape

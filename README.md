@@ -5,7 +5,7 @@ Interactive similarity search for microscopy images. Select a few cells you find
 ## Architecture
 
 ```
-React Frontend (localhost:3000)     Flask Backend (localhost:5000)
+Vite Frontend (localhost:5173)      Flask Backend (localhost:5050)
 ┌─────────────────────────┐        ┌──────────────────────────────┐
 │ Step 1: Load data        │───────▶│ Image loading (tifffile)     │
 │ Step 2: Select cells     │◀──────▶│ Cellpose-SAM segmentation    │
@@ -31,22 +31,30 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Server starts on http://localhost:5000. Model weights download automatically on first run.
+Server starts on http://localhost:5050. Model weights download automatically on first run.
 
 ### 3. Run the frontend
 
-The frontend is a single React component (MicroscopySearch.jsx). For development without GPU models, use the mock backend:
+For development without GPU models, use the mock backend:
 
 ```bash
 cd backend
 python mock_server.py   # Returns synthetic data on all endpoints
 ```
 
+Then start the Vite frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
 ### 4. Run tests
 
 ```bash
 cd backend && python -m pytest tests.py -v              # 30 backend tests
-cd frontend && python -m pytest tests_frontend_logic.py -v  # 35 frontend logic tests
+cd frontend && npm test                                    # frontend logic tests
 cd backend && python integration_test.py bbbc021_raw/Week1_22123/  # End-to-end smoke test
 ```
 
@@ -83,8 +91,11 @@ microscopy-search/
 | POST | /api/upload_bbbc021 | Load images from disk |
 | POST | /api/segment_and_embed | Run pipeline (async) |
 | GET | /api/status | Poll progress |
+| POST | /api/segment_preview | Preview segmentation on one image |
 | GET | /api/image/\<index\> | Get image thumbnail |
+| GET | /api/mask/\<index\> | Get encoded segmentation mask |
 | GET | /api/objects | Get cell metadata |
 | POST | /api/crops | Get cell thumbnails |
 | POST | /api/search | Similarity search |
+| POST | /api/search_dissimilar | Dissimilarity search |
 | POST | /api/export | Export results |

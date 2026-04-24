@@ -10,6 +10,28 @@ import numpy as np
 import tifffile
 
 
+def resolve_image_dir(image_dir, base_dirs=None):
+    """
+    Resolve a user-entered image directory against the current working
+    directory and any additional startup directories supplied by the app.
+    """
+    if not image_dir:
+        return None
+
+    expanded = os.path.expanduser(os.path.expandvars(image_dir))
+    candidates = [expanded]
+    if not os.path.isabs(expanded):
+        for base_dir in base_dirs or []:
+            candidates.append(os.path.join(base_dir, expanded))
+
+    for candidate in candidates:
+        resolved = os.path.abspath(candidate)
+        if os.path.isdir(resolved):
+            return resolved
+
+    return None
+
+
 def load_tiff(path: str) -> np.ndarray:
     """
     Load a 3-channel microscopy TIFF and normalize to (H, W, 3) float32.
