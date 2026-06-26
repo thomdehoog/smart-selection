@@ -6,12 +6,12 @@ Interactive similarity search for microscopy images. Select a few cells you find
 
 ```
 React Frontend (localhost:3000)     Flask Backend (localhost:5000)
-┌─────────────────────────┐        ┌──────────────────────────────┐
-│ Step 1: Load data        │───────▶│ Image loading (tifffile)     │
-│ Step 2: Select cells     │◀──────▶│ Cellpose-SAM segmentation    │
-│ Step 3: Review gallery   │───────▶│ DINOv2 patch embeddings      │
-│ Step 4: Search & refine  │◀──────▶│ FAISS similarity search      │
-└─────────────────────────┘        └──────────────────────────────┘
+┌──────────────────────────┐           ┌──────────────────────────────┐
+│ Step 1: Load data        │ ───────▶ │ Image loading (tifffile)     │
+│ Step 2: Select cells     │ ◀──────▶ │ Cellpose-SAM segmentation    │
+│ Step 3: Review gallery   │ ───────▶  │ DINOv2 patch embeddings      │
+│ Step 4: Search & refine  │ ◀──────▶ │ FAISS similarity search      │
+└──────────────────────────┘           └──────────────────────────────┘
 ```
 
 ## Quick Start
